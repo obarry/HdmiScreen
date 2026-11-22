@@ -1,0 +1,15 @@
+# Dossiers de build CMake
+build/
+out/
+cmake-build-*/
+
+# Visual Studio
+.vs/
+*.user
+CMakeSettings.json
+
+# Exécutables et objets
+*.exe
+*.obj
+*.pdb
+*.ilk
