@@ -138,6 +138,31 @@ int scoreCaptureDevice(const std::wstring& name, const std::vector<VideoMode>& m
     return score;
 }
 
+int chooseDevice(const std::vector<DeviceCandidate>& candidates, const std::wstring& preferredLink,
+                 bool userFiltered) {
+    // 1. Le périphérique déjà utilisé, s'il est revenu.
+    if (!preferredLink.empty()) {
+        for (size_t i = 0; i < candidates.size(); ++i) {
+            if (candidates[i].symbolicLink == preferredLink) {
+                return static_cast<int>(i);
+            }
+        }
+    }
+    // 2. Le meilleur score acceptable.
+    const int minimum = userFiltered ? 0 : kMinimumAutoScore;
+    int best = -1;
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        const int score = candidates[i].score;
+        if (score < minimum) {
+            continue;
+        }
+        if (best < 0 || score > candidates[static_cast<size_t>(best)].score) {
+            best = static_cast<int>(i);
+        }
+    }
+    return best;
+}
+
 bool containsIgnoreCase(const std::wstring& text, const std::wstring& fragment) {
     if (fragment.empty()) {
         return true;

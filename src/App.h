@@ -17,6 +17,8 @@
 
 #include <chrono>    // std::chrono::steady_clock ~ System.nanoTime
 #include <memory>    // std::unique_ptr
+#include <set>       // std::set ~ TreeSet
+#include <string>
 
 namespace hdmi {
 
@@ -57,6 +59,11 @@ private:
     Clock::time_point lastFrameTime_{};
     Clock::time_point lastOpenAttempt_{};
     bool showingNoSignal_ = false;
+
+    // Tolérance aux coupures.
+    std::wstring preferredLink_;           // boîtier utilisé en dernier (lien symbolique)
+    std::set<std::wstring> ignoredLinks_;  // périphériques écartés (webcams) : plus rouverts
+    bool waitingLogged_ = false;
 };
 
 } // namespace hdmi

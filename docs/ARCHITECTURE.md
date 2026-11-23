@@ -95,7 +95,13 @@ Tous les périphériques vidéo sont ouverts et inspectés (`probeDevices`), pui
 | Propose au moins un mode ≥ 1920×1080 à ≥ 50 i/s | +2 | Rare pour une webcam intégrée, normal pour un boîtier HDMI |
 | Nom sans mot typique de webcam (« Integrated », « Webcam », « IR camera »…) | +1 | Écarte la caméra du portable |
 
-Le meilleur score l'emporte ; en cas d'égalité, le premier de la liste. L'option `--device "texte"` restreint le choix aux périphériques dont le nom contient ce texte.
+`chooseDevice` (`Selection.cpp`) applique ensuite trois règles :
+
+1. **Le boîtier utilisé en dernier est repris en priorité** dès qu'il réapparaît (même lien symbolique), quel que soit son score : après une micro-coupure, on revient au même boîtier.
+2. Sinon, **le meilleur score** l'emporte ; en cas d'égalité, le premier de la liste.
+3. **Un score inférieur à 2 n'est jamais retenu automatiquement** (`kMinimumAutoScore`) : sans mode 1080p à 50 i/s ou plus, c'est presque sûrement une webcam. Mieux vaut l'écran « pas de signal » que la caméra du portable. Ces périphériques sont mémorisés et ne sont plus rouverts.
+
+L'option `--device "texte"` restreint le choix aux périphériques dont le nom contient ce texte, et lève la règle 3 : c'est l'utilisateur qui décide.
 
 ### 5.2 Mode
 
@@ -126,7 +132,7 @@ Ces cas sont couverts par `tests/SelectionTests.cpp`. Pour imposer un autre choi
 stateDiagram-v2
     [*] --> SansCapture: démarrage
     SansCapture --> Capture: tryOpenCapture réussit
-    SansCapture --> SansCapture: échec ou aucun boîtier, nouvel essai toutes les 2 s
+    SansCapture --> SansCapture: échec ou aucun boîtier, nouvel essai toutes les 500 ms
     Capture --> Capture: images reçues
     Capture --> SansCapture: erreur (boîtier débranché…), closeCapture
     Capture --> [*]: Échap / Alt+F4
@@ -135,14 +141,16 @@ stateDiagram-v2
 
 | Situation | Détection | Réaction |
 | --- | --- | --- |
-| Aucun boîtier au démarrage | `probeDevices` vide | Écran gris « pas de signal », nouvel essai toutes les 2 s |
-| Boîtier débranché | `OnReadSample` en échec ou événement `MEVideoCaptureDeviceRemoved` | `error_` positionné, la boucle ferme la session et retente toutes les 2 s |
-| Câble HDMI retiré (boîtier toujours branché) | Plus d'image pendant 1 s | Écran gris ; l'affichage reprend dès le retour du signal |
-| Boîtier occupé par une autre appli | Échec à l'ouverture | Journalisé, nouvel essai toutes les 2 s |
+| Aucun boîtier au démarrage (seulement la webcam) | `chooseDevice` ne trouve aucun périphérique de score ≥ 2 | Écran gris « pas de signal », nouvel essai toutes les 500 ms ; la webcam n'est jamais affichée |
+| Micro-coupure USB : le boîtier disparaît puis revient (erreur `0xC00D3EA2`, `MF_E_VIDEO_RECORDING_DEVICE_INVALIDATED`) | `OnReadSample` en échec ou événement `MEVideoCaptureDeviceRemoved` | La session est fermée ; la dernière image reste affichée ; nouvel essai toutes les 500 ms, en reprenant le même boîtier dès qu'il réapparaît |
+| Câble HDMI retiré (boîtier toujours branché) | Plus d'image pendant 3 s | Écran gris ; l'affichage reprend dès le retour du signal |
+| Boîtier occupé par une autre appli | Échec à l'ouverture | Journalisé, nouvel essai toutes les 500 ms |
 | Erreur Direct3D (GPU réinitialisé…) | Exception dans `drawFrame` | Message d'erreur et fin du programme (limite connue de cette version) |
 | Exception dans la procédure de fenêtre | Barrière `try/catch` de `windowProc` | Journalisée, fin propre du programme |
 
-Le gris très sombre de l'écran « pas de signal » permet de distinguer une absence de signal d'un écran noir réellement capturé.
+Le gris très sombre de l'écran « pas de signal » permet de distinguer une absence de signal d'un écran noir réellement capturé. Il n'apparaît qu'après 3 s sans image, pour ne pas clignoter lors des micro-coupures.
+
+**Micro-coupure USB ou HDMI ?** Une coupure du lien **USB** fait disparaître le boîtier de Windows (erreur `0xC00D3EA2`), puis Windows le redétecte en une à deux secondes. Une coupure du seul lien **HDMI** laisse le boîtier présent : les images s'arrêtent simplement, puis reprennent.
 
 ## 7. Limites connues et pistes
 
@@ -150,5 +158,5 @@ Le gris très sombre de l'écran « pas de signal » permet de distinguer une ab
 - **Pas de texte à l'écran** (mode courant, i/s). Piste : Direct2D/DirectWrite par-dessus la swap chain (touche F1).
 - **Perte du périphérique D3D** (mise à jour du pilote, GPU réinitialisé) : le programme s'arrête au lieu de recréer le rendu.
 - **Pas de fichier de configuration** : les réglages passent par la ligne de commande. Piste : `hdmiscreen.ini` à côté de l'exécutable.
-- **Inspection des périphériques** : à chaque tentative de connexion, tous les périphériques vidéo sont ouverts brièvement pour lire leurs modes (sans démarrer la capture).
+- **Inspection des périphériques** : à chaque tentative de connexion, les périphériques vidéo sont ouverts brièvement pour lire leurs modes (sans démarrer la capture), sauf ceux déjà écartés comme webcams.
 - **Audio HDMI** : ignoré.
