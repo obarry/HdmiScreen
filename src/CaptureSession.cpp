@@ -168,11 +168,12 @@ void CaptureSession::stop() {
 
     if (reader && started) {
         // [API] Flush annule la demande en cours ; MF appelle ensuite OnFlush.
-        // On attend cet appel (2 s max) pour être sûr qu'aucun callback ne
-        // s'exécute encore quand on libère le lecteur.
+        // On attend cet appel (500 ms max : un boîtier débranché peut ne jamais
+        // répondre) pour être sûr qu'aucun callback ne s'exécute encore quand on
+        // libère le lecteur.
         ResetEvent(flushDone_.get());
         if (SUCCEEDED(reader->Flush(static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM)))) {
-            WaitForSingleObject(flushDone_.get(), 2000);
+            WaitForSingleObject(flushDone_.get(), 500);
         }
     }
 

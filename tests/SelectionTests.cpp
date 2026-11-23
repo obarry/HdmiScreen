@@ -136,6 +136,31 @@ void testDeviceScoring() {
     CHECK(!containsIgnoreCase(L"USB3 Video", L"camera"));
 }
 
+void testWebcamIsNeverChosenAutomatically() {
+    // Cas réel : seule la webcam du portable est présente (boîtier débranché).
+    const std::vector<VideoMode> webcamModes = {mode(2560, 1440, 30, PixelFormat::Nv12)};
+    const int webcamScore = scoreCaptureDevice(L"HP 5MP Camera", webcamModes);
+    CHECK(webcamScore < kMinimumAutoScore);
+    CHECK(chooseDevice({{L"webcam", webcamScore}}, L"", false) == -1);
+    // Avec --device, l'utilisateur a choisi : on accepte.
+    CHECK(chooseDevice({{L"webcam", webcamScore}}, L"", true) == 0);
+}
+
+void testBoxIsPreferredOverWebcam() {
+    const std::vector<DeviceCandidate> candidates = {{L"webcam", 1}, {L"box", 3}};
+    CHECK(chooseDevice(candidates, L"", false) == 1);
+}
+
+void testSameDeviceAfterMicroCut() {
+    // Deux boîtiers ; on utilisait le second : après une coupure, on y revient
+    // même si l'autre a un meilleur score.
+    const std::vector<DeviceCandidate> candidates = {{L"box-a", 3}, {L"box-b", 2}};
+    CHECK(chooseDevice(candidates, L"box-b", false) == 1);
+    // S'il n'est pas (encore) revenu, on prend le meilleur acceptable.
+    CHECK(chooseDevice({{L"box-a", 3}}, L"box-b", false) == 0);
+    CHECK(chooseDevice({}, L"box-b", false) == -1);
+}
+
 // --- Géométrie ---------------------------------------------------------------
 
 void testFitLetterbox() {
@@ -195,6 +220,9 @@ int main() {
     testIgnoresUnknownFormatsAndEmptyLists();
     testFindModeHonoursRequest();
     testDeviceScoring();
+    testWebcamIsNeverChosenAutomatically();
+    testBoxIsPreferredOverWebcam();
+    testSameDeviceAfterMicroCut();
     testFitLetterbox();
     testOneToOneAndStretch();
     testCommandLine();

@@ -12,11 +12,15 @@ namespace hdmi {
 
 namespace {
 
-// [C++] « using namespace » limité à ce fichier : autorise 2s, 250ms…
+// [C++] « using namespace » limité à ce fichier : autorise 500ms, 3s…
 using namespace std::chrono_literals;
 
-constexpr auto kReconnectInterval = 2s;     // fréquence des tentatives d'ouverture
-constexpr auto kNoSignalDelay = 1s;         // délai sans image avant « pas de signal »
+// Après une perte du boîtier (micro-coupure USB), on retente vite : Windows met
+// en général une à deux secondes à le redétecter.
+constexpr auto kReconnectInterval = 500ms;  // fréquence des tentatives d'ouverture
+// Pendant une courte coupure, on laisse la dernière image affichée plutôt que
+// de faire clignoter l'écran gris.
+constexpr auto kNoSignalDelay = 3s;         // délai sans image avant « pas de signal »
 constexpr DWORD kLoopTimeoutMs = 250;       // réveil minimal de la boucle
 
 // Un périphérique ouvert et inspecté, candidat à la capture.
@@ -28,11 +32,19 @@ struct ProbedDevice {
 };
 
 // Ouvre tous les périphériques (filtrés par --device) et lit leurs modes.
+// Ceux dont le lien symbolique figure dans « skipped » ne sont pas rouverts
+// (webcam déjà écartée : inutile de la réveiller toutes les 500 ms).
 // Les sources non retenues devront être fermées par shutdownAll.
-std::vector<ProbedDevice> probeDevices(const Options& options) {
+//
+// [C++ vs Java] std::set ~ TreeSet (trié) ; std::unordered_set ~ HashSet.
+// count(x) renvoie 0 ou 1 : c'est le « contains » des ensembles C++ (C++20 a aussi contains).
+std::vector<ProbedDevice> probeDevices(const Options& options, const std::set<std::wstring>& skipped) {
     std::vector<ProbedDevice> probed;
     for (const CaptureDeviceInfo& info : enumerateCaptureDevices()) {
         if (!options.deviceFilter.empty() && !containsIgnoreCase(info.name, options.deviceFilter)) {
+            continue;
+        }
+        if (skipped.count(info.symbolicLink) != 0) {
             continue;
         }
         try {
@@ -63,16 +75,19 @@ void shutdownAll(std::vector<ProbedDevice>& devices) {
     }
 }
 
-// Index du meilleur candidat (score le plus haut ; en cas d'égalité, le premier).
-// Renvoie -1 si la liste est vide.
-int bestDeviceIndex(const std::vector<ProbedDevice>& devices) {
-    int best = -1;
-    for (size_t i = 0; i < devices.size(); ++i) {
-        if (best < 0 || devices[i].score > devices[static_cast<size_t>(best)].score) {
-            best = static_cast<int>(i);
-        }
+// Index du périphérique à utiliser, ou -1 (règles : chooseDevice, Selection.h).
+int deviceIndex(const std::vector<ProbedDevice>& devices, const std::wstring& preferredLink,
+                const Options& options) {
+    std::vector<DeviceCandidate> candidates;
+    for (const ProbedDevice& device : devices) {
+        candidates.push_back({device.info.symbolicLink, device.score});
     }
-    return best;
+    return chooseDevice(candidates, preferredLink, !options.deviceFilter.empty());
+}
+
+// Vrai si ce périphérique ne sera jamais retenu automatiquement (webcam…).
+bool belowAutoThreshold(const ProbedDevice& device, const Options& options) {
+    return options.deviceFilter.empty() && device.score < kMinimumAutoScore;
 }
 
 // Mode à utiliser pour un périphérique : celui imposé par --mode, sinon le meilleur.
@@ -112,8 +127,8 @@ ScreenSize primaryScreenSize() {
 
 int runListCommand(const Options& options) {
     const ScreenSize screen = primaryScreenSize();
-    std::vector<ProbedDevice> devices = probeDevices(options);
-    const int best = bestDeviceIndex(devices);
+    std::vector<ProbedDevice> devices = probeDevices(options, {});
+    const int best = deviceIndex(devices, L"", options);
 
     std::wstring text = std::format(L"Écran principal : {}x{}\n\n", screen.width, screen.height);
     if (devices.empty()) {
@@ -122,8 +137,11 @@ int runListCommand(const Options& options) {
     for (size_t i = 0; i < devices.size(); ++i) {
         const ProbedDevice& device = devices[i];
         const bool chosen = static_cast<int>(i) == best;
-        text += std::format(L"[{}] {}  (score {}){}\n", i + 1, device.info.name, device.score,
-                            chosen ? L"  <= périphérique retenu" : L"");
+        const wchar_t* status = chosen ? L"  <= périphérique retenu"
+                                : belowAutoThreshold(device, options)
+                                    ? L"  (ignoré : pas de mode 1080p à 50 i/s ou plus, webcam probable)"
+                                    : L"";
+        text += std::format(L"[{}] {}  (score {}){}\n", i + 1, device.info.name, device.score, status);
         const std::optional<VideoMode> mode = chooseMode(options, device.modes, screen);
         for (const VideoMode& m : device.modes) {
             const bool isChosenMode = mode && mode->nativeIndex == m.nativeIndex;
@@ -186,10 +204,25 @@ App::~App() {
 
 bool App::tryOpenCapture() {
     lastOpenAttempt_ = Clock::now();
-    std::vector<ProbedDevice> devices = probeDevices(options_);
-    const int best = bestDeviceIndex(devices);
+    std::vector<ProbedDevice> devices = probeDevices(options_, ignoredLinks_);
+
+    // Mémoriser les périphériques qui ne seront jamais retenus, pour ne plus les rouvrir.
+    for (const ProbedDevice& device : devices) {
+        if (belowAutoThreshold(device, options_) && device.info.symbolicLink != preferredLink_) {
+            if (ignoredLinks_.insert(device.info.symbolicLink).second) {   // second : vraiment ajouté
+                log::info(device.info.name + L" ignoré : pas un boîtier de capture (webcam probable)");
+            }
+        }
+    }
+
+    const int best = deviceIndex(devices, preferredLink_, options_);
     if (best < 0) {
-        log::info(L"Aucun périphérique de capture : nouvelle tentative dans 2 s");
+        // Message une seule fois par période d'attente, pas toutes les 500 ms.
+        if (!waitingLogged_) {
+            log::info(L"Aucun boîtier de capture : en attente de sa connexion");
+            waitingLogged_ = true;
+        }
+        shutdownAll(devices);
         return false;
     }
 
@@ -218,6 +251,10 @@ bool App::tryOpenCapture() {
     const FrameFormat& out = session_->frameFormat();
     log::info(std::format(L"Capture : {} en {} ; images livrées en {}x{} {}", device.info.name,
                           describe(*mode), out.width, out.height, toString(out.format)));
+    // Ce boîtier devient le périphérique « préféré » : après une coupure, c'est lui
+    // qu'on attend et qu'on reprend.
+    preferredLink_ = device.info.symbolicLink;
+    waitingLogged_ = false;
     lastFrameTime_ = Clock::now();
     return true;
 }

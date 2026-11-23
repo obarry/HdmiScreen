@@ -47,14 +47,16 @@ L'exécutable est produit dans `build\Release\hdmiscreen.exe`.
 | F11 | Basculer plein écran / fenêtre |
 | S | Mise à l'échelle : ajuster → 1:1 → étirer |
 
-Le curseur se masque après 2 s d'immobilité, et la mise en veille de l'écran est bloquée tant que l'outil tourne. Si le boîtier est débranché, un écran gris s'affiche et l'outil se reconnecte tout seul.
+Le curseur se masque après 2 s d'immobilité, et la mise en veille de l'écran est bloquée tant que l'outil tourne.
+
+**Coupures.** Si le boîtier disparaît un instant (faux contact USB), la dernière image reste affichée et l'outil se reconnecte tout seul au même boîtier dès qu'il réapparaît. Au-delà de 3 s sans image, un écran gris sombre s'affiche. La webcam du portable n'est jamais choisie automatiquement ; pour l'utiliser malgré tout, il faut la désigner avec `--device`.
 
 ### Options
 
 | Option | Effet |
 | --- | --- |
 | `--list` | Liste les périphériques vidéo, leurs modes et les choix automatiques, puis quitte |
-| `--device "texte"` | Utilise le périphérique dont le nom contient ce texte |
+| `--device "texte"` | Utilise le périphérique dont le nom contient ce texte (même une webcam) |
 | `--mode 1920x1200[@60]` | Impose un mode de capture |
 | `--scaling fit\|1to1\|stretch` | Mise à l'échelle initiale (défaut : `fit`) |
 | `--full-range` | Le signal est en plage complète 0-255 (à essayer si l'image paraît trop contrastée) |

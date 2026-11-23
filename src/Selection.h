@@ -44,6 +44,28 @@ std::optional<VideoMode> findMode(const std::vector<VideoMode>& modes,
 //  +1 : son nom ne contient pas de mot typique d'une webcam intégrée
 int scoreCaptureDevice(const std::wstring& name, const std::vector<VideoMode>& modes);
 
+// Score minimal pour qu'un périphérique soit retenu AUTOMATIQUEMENT (sans --device) :
+// il doit proposer au moins un mode >= 1920x1080 à >= 50 i/s. Les webcams
+// (généralement limitées à 30 i/s) sont ainsi écartées : mieux vaut l'écran
+// « pas de signal » que la caméra du portable.
+// [C++] constexpr sur une variable : constante connue à la compilation (~ static final).
+constexpr int kMinimumAutoScore = 2;
+
+// Ce que la sélection a besoin de savoir d'un périphérique.
+struct DeviceCandidate {
+    std::wstring symbolicLink;   // identifiant stable du périphérique
+    int score = 0;               // résultat de scoreCaptureDevice
+};
+
+// Choisit le périphérique à utiliser parmi les candidats. Renvoie son index, ou -1.
+//  1. Si le périphérique utilisé précédemment (preferredLink) est présent, on le
+//     reprend, quel que soit son score : après une micro-coupure, on revient au même boîtier.
+//  2. Sinon, le meilleur score (le premier en cas d'égalité), à condition
+//     d'atteindre kMinimumAutoScore — sauf si l'utilisateur a désigné le
+//     périphérique lui-même (userFiltered, option --device).
+int chooseDevice(const std::vector<DeviceCandidate>& candidates, const std::wstring& preferredLink,
+                 bool userFiltered);
+
 // Vrai si « text » contient « fragment », sans tenir compte de la casse
 // (utilisé pour l'option --device).
 bool containsIgnoreCase(const std::wstring& text, const std::wstring& fragment);
