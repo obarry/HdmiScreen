@@ -64,6 +64,9 @@ private:
     std::wstring preferredLink_;           // boîtier utilisé en dernier (lien symbolique)
     std::set<std::wstring> ignoredLinks_;  // périphériques écartés (webcams) : plus rouverts
     bool waitingLogged_ = false;
+    bool notReadyLogged_ = false;          // « détecté mais pas encore prêt » déjà signalé
+    int disconnectCount_ = 0;              // nombre de coupures depuis le lancement
+    Clock::time_point lostTime_{};         // instant de la dernière coupure
 };
 
 } // namespace hdmi

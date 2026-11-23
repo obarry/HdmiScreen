@@ -150,6 +150,8 @@ stateDiagram-v2
 
 Le gris très sombre de l'écran « pas de signal » permet de distinguer une absence de signal d'un écran noir réellement capturé. Il n'apparaît qu'après 3 s sans image, pour ne pas clignoter lors des micro-coupures.
 
+**Journal.** Chaque ligne est horodatée (`[23:02:14.531] [HdmiScreen] …`). Chaque coupure est numérotée, et la reprise indique la durée d'interruption (« Reprise après 4.6 s d'interruption (coupure n° 1) »). Les tentatives d'ouverture refusées pendant que Windows réinitialise le boîtier ne donnent lieu qu'à un seul message par période d'attente. Le journal est visible dans la fenêtre Sortie de Visual Studio, ou avec l'outil DebugView de Sysinternals.
+
 **Micro-coupure USB ou HDMI ?** Une coupure du lien **USB** fait disparaître le boîtier de Windows (erreur `0xC00D3EA2`), puis Windows le redétecte en une à deux secondes. Une coupure du seul lien **HDMI** laisse le boîtier présent : les images s'arrêtent simplement, puis reprennent.
 
 ## 7. Limites connues et pistes

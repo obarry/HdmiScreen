@@ -31,6 +31,13 @@ struct ProbedDevice {
     int score = 0;
 };
 
+// Un périphérique listé par Windows mais impossible à ouvrir pour l'instant
+// (occupé par une autre appli, ou boîtier pas encore prêt après une coupure).
+struct ProbeFailure {
+    std::wstring name;
+    std::wstring message;
+};
+
 // Ouvre tous les périphériques (filtrés par --device) et lit leurs modes.
 // Ceux dont le lien symbolique figure dans « skipped » ne sont pas rouverts
 // (webcam déjà écartée : inutile de la réveiller toutes les 500 ms).
@@ -38,7 +45,13 @@ struct ProbedDevice {
 //
 // [C++ vs Java] std::set ~ TreeSet (trié) ; std::unordered_set ~ HashSet.
 // count(x) renvoie 0 ou 1 : c'est le « contains » des ensembles C++ (C++20 a aussi contains).
-std::vector<ProbedDevice> probeDevices(const Options& options, const std::set<std::wstring>& skipped) {
+//
+// Les échecs d'ouverture ne sont pas journalisés ici mais ajoutés à « failures » :
+// c'est l'appelant qui décide s'ils méritent un message.
+// [C++] Paramètre de sortie par référence non constante : la fonction remplit
+// le vecteur de l'appelant (en Java, on passerait une List à remplir).
+std::vector<ProbedDevice> probeDevices(const Options& options, const std::set<std::wstring>& skipped,
+                                       std::vector<ProbeFailure>& failures) {
     std::vector<ProbedDevice> probed;
     for (const CaptureDeviceInfo& info : enumerateCaptureDevices()) {
         if (!options.deviceFilter.empty() && !containsIgnoreCase(info.name, options.deviceFilter)) {
@@ -57,8 +70,8 @@ std::vector<ProbedDevice> probeDevices(const Options& options, const std::set<st
             // copier (pas de AddRef/Release inutile sur la source).
             probed.push_back(std::move(device));
         } catch (const HrError& e) {
-            // Un périphérique occupé par une autre appli ne doit pas tout bloquer.
-            log::error(std::format(L"{} : {}", info.name, widen(e.what())));
+            // Un périphérique indisponible ne doit pas empêcher d'inspecter les autres.
+            failures.push_back({info.name, widen(e.what())});
         }
     }
     return probed;
@@ -127,8 +140,12 @@ ScreenSize primaryScreenSize() {
 
 int runListCommand(const Options& options) {
     const ScreenSize screen = primaryScreenSize();
-    std::vector<ProbedDevice> devices = probeDevices(options, {});
+    std::vector<ProbeFailure> failures;
+    std::vector<ProbedDevice> devices = probeDevices(options, {}, failures);
     const int best = deviceIndex(devices, L"", options);
+    for (const ProbeFailure& failure : failures) {
+        log::error(failure.name + L" : " + failure.message);
+    }
 
     std::wstring text = std::format(L"Écran principal : {}x{}\n\n", screen.width, screen.height);
     if (devices.empty()) {
@@ -204,7 +221,19 @@ App::~App() {
 
 bool App::tryOpenCapture() {
     lastOpenAttempt_ = Clock::now();
-    std::vector<ProbedDevice> devices = probeDevices(options_, ignoredLinks_);
+    std::vector<ProbeFailure> failures;
+    std::vector<ProbedDevice> devices = probeDevices(options_, ignoredLinks_, failures);
+
+    // Après une coupure, Windows réannonce le boîtier un peu avant qu'il soit
+    // utilisable : l'ouverture échoue alors quelques fois de suite. On le
+    // signale une seule fois par période d'attente, pas toutes les 500 ms.
+    if (!failures.empty() && !notReadyLogged_) {
+        for (const ProbeFailure& failure : failures) {
+            log::info(failure.name + L" détecté mais pas encore prêt (" + failure.message +
+                      L") : nouvelles tentatives en cours");
+        }
+        notReadyLogged_ = true;
+    }
 
     // Mémoriser les périphériques qui ne seront jamais retenus, pour ne plus les rouvrir.
     for (const ProbedDevice& device : devices) {
@@ -251,10 +280,19 @@ bool App::tryOpenCapture() {
     const FrameFormat& out = session_->frameFormat();
     log::info(std::format(L"Capture : {} en {} ; images livrées en {}x{} {}", device.info.name,
                           describe(*mode), out.width, out.height, toString(out.format)));
+    // Après une coupure : durée d'indisponibilité, utile pour juger le matériel.
+    if (disconnectCount_ > 0 && lostTime_ != Clock::time_point{}) {
+        // [C++] duration_cast convertit une durée dans une autre unité (ici en ms).
+        const auto downtime = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - lostTime_);
+        log::info(std::format(L"Reprise après {:.1f} s d'interruption (coupure n° {})",
+                              downtime.count() / 1000.0, disconnectCount_));
+        lostTime_ = Clock::time_point{};
+    }
     // Ce boîtier devient le périphérique « préféré » : après une coupure, c'est lui
     // qu'on attend et qu'on reprend.
     preferredLink_ = device.info.symbolicLink;
     waitingLogged_ = false;
+    notReadyLogged_ = false;
     lastFrameTime_ = Clock::now();
     return true;
 }
@@ -313,8 +351,10 @@ int App::run() {
 
         // 3. Capture en erreur (boîtier débranché…) : fermer, on retentera.
         if (session_ && FAILED(session_->error())) {
-            log::error(std::format(L"Capture interrompue (HRESULT 0x{:08X})",
-                                   static_cast<unsigned long>(session_->error())));
+            ++disconnectCount_;
+            lostTime_ = Clock::now();
+            log::error(std::format(L"Capture interrompue, coupure n° {} (HRESULT 0x{:08X})",
+                                   disconnectCount_, static_cast<unsigned long>(session_->error())));
             closeCapture();
         }
 
