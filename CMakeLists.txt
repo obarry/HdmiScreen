@@ -13,7 +13,7 @@
 #   ctest --test-dir build -C Release
 
 cmake_minimum_required(VERSION 3.21)
-project(HdmiScreen VERSION 0.1.0 LANGUAGES CXX)
+project(HdmiScreen VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)            # C++20 : std::format, etc.
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -62,6 +62,7 @@ if(WIN32)
         src/Log.cpp
         src/MainWindow.cpp
         src/Renderer.cpp
+        src/SettingsFile.cpp
     )
     target_link_libraries(hdmiscreen PRIVATE
         hdmiscreen_core
@@ -70,7 +71,10 @@ if(WIN32)
         shell32                        # CommandLineToArgvW
     )
     # UNICODE : les macros Win32 (CreateWindowEx…) pointent vers les versions « W ».
-    target_compile_definitions(hdmiscreen PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_definitions(hdmiscreen PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX
+        # Version affichée dans « À propos », tirée de project(... VERSION ...) ci-dessus.
+        # L"..." : littéral « large » (wchar_t), directement utilisable par l'API Windows.
+        HDMISCREEN_VERSION=L"${PROJECT_VERSION}")
 
     if(MINGW)
         # Compilation avec MinGW (GCC pour Windows) : point d'entrée Unicode et

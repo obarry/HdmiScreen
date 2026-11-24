@@ -52,8 +52,33 @@ std::optional<RequestedMode> parseModeText(const std::wstring& text) {
     return RequestedMode{*width, *height, *fps};
 }
 
-ParseResult parseArguments(const std::vector<std::wstring>& args) {
+std::wstring toText(const RequestedMode& mode) {
+    std::wstring text = std::to_wstring(mode.width) + L"x" + std::to_wstring(mode.height);
+    if (mode.fps != 0) {
+        text += L"@" + std::to_wstring(mode.fps);
+    }
+    return text;
+}
+
+const wchar_t* toText(ScalingMode scaling) {
+    switch (scaling) {
+        case ScalingMode::Fit:      return L"fit";
+        case ScalingMode::OneToOne: return L"1to1";
+        case ScalingMode::Stretch:  return L"stretch";
+    }
+    return L"fit";
+}
+
+std::optional<ScalingMode> parseScalingText(const std::wstring& text) {
+    if (text == L"fit") return ScalingMode::Fit;
+    if (text == L"1to1") return ScalingMode::OneToOne;
+    if (text == L"stretch") return ScalingMode::Stretch;
+    return std::nullopt;
+}
+
+ParseResult parseArguments(const std::vector<std::wstring>& args, const Options& base) {
     ParseResult result;
+    result.options = base;               // copie des options de départ (struct = type valeur)
     Options& options = result.options;   // [C++] référence : un alias, pas une copie
 
     // [C++] size_t : entier non signé utilisé pour les tailles et les index.
@@ -78,6 +103,8 @@ ParseResult parseArguments(const std::vector<std::wstring>& args) {
             options.listDevices = true;
         } else if (arg == L"--windowed") {
             options.windowed = true;
+        } else if (arg == L"--fullscreen") {
+            options.windowed = false;
         } else if (arg == L"--full-range") {
             options.fullRange = true;
         } else if (arg == L"--device") {
@@ -99,16 +126,12 @@ ParseResult parseArguments(const std::vector<std::wstring>& args) {
             if (!nextValue(value)) {
                 return result;
             }
-            if (value == L"fit") {
-                options.scaling = ScalingMode::Fit;
-            } else if (value == L"1to1") {
-                options.scaling = ScalingMode::OneToOne;
-            } else if (value == L"stretch") {
-                options.scaling = ScalingMode::Stretch;
-            } else {
+            const std::optional<ScalingMode> scaling = parseScalingText(value);
+            if (!scaling) {
                 result.error = L"Mise à l'échelle inconnue : " + value + L" (fit, 1to1 ou stretch)";
                 return result;
             }
+            options.scaling = *scaling;
         } else {
             result.error = L"Option inconnue : " + arg;
             return result;
@@ -131,9 +154,14 @@ Usage : hdmiscreen.exe [options]
                          mise à l'échelle (défaut : fit)
   --full-range           le signal est en plage complète 0-255 (défaut : 16-235)
   --windowed             démarre en fenêtre
+  --fullscreen           démarre en plein écran
   --help                 affiche cette aide
 
-Raccourcis : Échap quitter, F11 plein écran/fenêtre, S mise à l'échelle.
+Les réglages choisis dans les menus sont enregistrés dans hdmiscreen.ini, à côté
+de l'exécutable ; les options ci-dessus les remplacent pour la session.
+
+Raccourcis : Échap quitter, F11 plein écran/fenêtre, S mise à l'échelle,
+R plage de couleur, clic droit menu.
 )";
 }
 

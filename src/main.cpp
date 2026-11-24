@@ -11,6 +11,7 @@
 #include "CommandLine.h"
 #include "ComUtils.h"
 #include "Log.h"
+#include "SettingsFile.h"
 
 #include <shellapi.h>   // [API] CommandLineToArgvW
 
@@ -49,7 +50,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*previous*/, PWSTR /*commandL
     // l'image lui-même (flou). Ici, on travaille en pixels physiques.
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
-    const hdmi::ParseResult parsed = hdmi::parseArguments(commandLineArguments());
+    // Réglages : valeurs par défaut < hdmiscreen.ini < ligne de commande.
+    const std::wstring settingsPath = hdmi::defaultSettingsPath();
+    const hdmi::ParseResult parsed =
+        hdmi::parseArguments(commandLineArguments(), hdmi::loadSettings(settingsPath));
     const hdmi::Options& options = parsed.options;
     if (!parsed.ok() || options.showHelp || options.listDevices) {
         hdmi::log::attachParentConsole();   // sorties texte : vers l'invite si possible
@@ -74,7 +78,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE /*previous*/, PWSTR /*commandL
         if (options.listDevices) {
             return hdmi::runListCommand(options);
         }
-        hdmi::App app(instance, options);
+        hdmi::App app(instance, options, settingsPath);
         return app.run();
     } catch (const std::exception& e) {
         const std::wstring message = hdmi::widen(e.what());

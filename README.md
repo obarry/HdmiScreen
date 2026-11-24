@@ -38,7 +38,7 @@ L'exécutable est produit dans `build\Release\hdmiscreen.exe`.
 ## Utiliser
 
 1. Brancher le boîtier sur un port USB 3 du portable perso, et le câble HDMI du portable pro.
-2. Sur le portable pro : Win+P > **Étendre**, puis Paramètres > Affichage. Sélectionner le nouvel écran et choisir la résolution du mode capturé (voir `--list`), de préférence **1920×1200** si elle est proposée, sinon **1920×1080**. Mettre l'échelle à 100 %.
+2. Sur le portable pro : Win+P > **Étendre**, puis Paramètres > Affichage. Sélectionner le nouvel écran et choisir la résolution du mode capturé (voir `--list`), de préférence **1920×1200** si elle est proposée, sinon **1920×1080**. L'échelle d'affichage (100 %, 125 %…) n'a pas d'effet sur la capture : la choisir pour le confort de lecture.
 3. Sur le portable perso : lancer `hdmiscreen.exe`.
 
 | Touche | Action |
@@ -46,6 +46,22 @@ L'exécutable est produit dans `build\Release\hdmiscreen.exe`.
 | Échap ou Alt+F4 | Quitter |
 | F11 | Basculer plein écran / fenêtre |
 | S | Mise à l'échelle : ajuster → 1:1 → étirer |
+| R | Plage de couleur : limitée (16-235) ↔ complète (0-255) |
+| Clic droit | Menu complet, y compris en plein écran |
+
+### Menus et réglages
+
+En mode fenêtré (F11), une barre de menus donne accès à tous les réglages. En plein écran, le même contenu s'obtient par un clic droit sur l'image.
+
+| Menu | Contenu |
+| --- | --- |
+| Fichier | Reconnecter le boîtier, Quitter |
+| Affichage | Plein écran ; mise à l'échelle (ajuster, 1:1, étirer) ; plage de couleur |
+| Périphérique | Automatique, ou un périphérique précis (y compris une webcam) |
+| Mode | Automatique (le mode retenu est indiqué), ou une résolution du boîtier |
+| Aide | Raccourcis clavier, À propos (version, emplacement des réglages) |
+
+Chaque choix est **enregistré dans `hdmiscreen.ini`**, à côté de l'exécutable, et repris au lancement suivant. Les options de la ligne de commande remplacent ces réglages pour la session. Le titre de la fenêtre indique le boîtier et le mode en cours.
 
 Le curseur se masque après 2 s d'immobilité, et la mise en veille de l'écran est bloquée tant que l'outil tourne.
 
@@ -60,7 +76,7 @@ Le curseur se masque après 2 s d'immobilité, et la mise en veille de l'écran 
 | `--mode 1920x1200[@60]` | Impose un mode de capture |
 | `--scaling fit\|1to1\|stretch` | Mise à l'échelle initiale (défaut : `fit`) |
 | `--full-range` | Le signal est en plage complète 0-255 (à essayer si l'image paraît trop contrastée) |
-| `--windowed` | Démarre en fenêtre |
+| `--windowed` / `--fullscreen` | Démarre en fenêtre / en plein écran |
 | `--help` | Aide |
 
 Premier lancement conseillé, depuis une invite de commandes :
@@ -76,8 +92,10 @@ HdmiScreen/
 ├─ CMakeLists.txt          description du build
 ├─ src/
 │  ├─ main.cpp             point d'entrée
-│  ├─ App.*                assemblage, boucle principale, --list
-│  ├─ MainWindow.*         fenêtre Win32
+│  ├─ App.*                assemblage, boucle principale, menus et commandes, --list
+│  ├─ Commands.h           identifiants des commandes (menus, raccourcis)
+│  ├─ SettingsFile.*       réglages persistants (hdmiscreen.ini)
+│  ├─ MainWindow.*         fenêtre Win32, barre de menus, menu contextuel
 │  ├─ CaptureDevices.*     découverte des périphériques et modes (Media Foundation)
 │  ├─ CaptureSession.*     capture asynchrone (objet COM)
 │  ├─ Renderer.*           affichage (Direct3D 11)
@@ -114,10 +132,10 @@ Les commentaires du code sont balisés :
 | Étape | Contenu | État |
 | --- | --- | --- |
 | 1 | Validation du matériel (appli Caméra) | Fait |
-| 2 | Prototype : liste des modes, capture, affichage plein écran | **Cette version** |
-| 3 | Choix automatique du mode, faible latence | **Cette version** |
-| 4 | Confort : mise à l'échelle, curseur, anti-veille, reconnexion | **Cette version** (sauf fichier .ini) |
-| 5 | Texte à l'écran (F1), fichier `hdmiscreen.ini`, agrandissement par shader | À faire |
-| 6 | Optionnel : audio HDMI, icône | À faire |
-
-Cette version a été compilée et ses tests exécutés, mais pas encore essayée avec le boîtier : la première session de test sur le matériel validera la capture, le rendu et les modes réels.
+| 2 | Prototype : liste des modes, capture, affichage plein écran | Fait (0.1) |
+| 3 | Choix automatique du mode, faible latence | Fait (0.1) |
+| 4 | Confort : mise à l'échelle, curseur, anti-veille, reconnexion, tolérance aux coupures USB, journal horodaté | Fait (0.1) |
+| 5a | Barre de menus, menu contextuel, `hdmiscreen.ini`, touche R | **0.2** |
+| 5b | Barre d'état, historique des connexions (fenêtre Journal, `hdmiscreen.log`) | À faire |
+| 5c | Bandeau d'informations F1 en plein écran (Direct2D / DirectWrite) | À faire |
+| 6 | Agrandissement par shader, reprise après perte du GPU, icône, audio HDMI (optionnel) | À faire |

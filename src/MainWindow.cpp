@@ -3,6 +3,7 @@
 // =============================================================================
 
 #include "MainWindow.h"
+#include "Commands.h"
 #include "Log.h"
 
 namespace hdmi {
@@ -61,7 +62,29 @@ MainWindow::~MainWindow() {
     if (hwnd_ != nullptr) {
         DestroyWindow(hwnd_);
     }
+    // La barre de menus est détachée de la fenêtre dans WM_DESTROY : elle n'a
+    // donc pas été détruite avec elle, c'est à nous de le faire.
+    if (menuBar_ != nullptr) {
+        DestroyMenu(menuBar_);
+    }
     UnregisterClassW(kWindowClassName, GetModuleHandleW(nullptr));
+}
+
+void MainWindow::setMenuBar(HMENU menu) {
+    HMENU old = menuBar_;
+    menuBar_ = menu;
+    if (!fullscreen_) {
+        // [API] SetMenu attache le menu à la fenêtre (ou le retire avec nullptr).
+        // La zone client rétrécit de la hauteur de la barre : WM_SIZE suit.
+        SetMenu(hwnd_, menuBar_);
+    }
+    if (old != nullptr) {
+        DestroyMenu(old);   // détruit aussi tous ses sous-menus
+    }
+}
+
+void MainWindow::setTitle(const std::wstring& title) {
+    SetWindowTextW(hwnd_, title.c_str());
 }
 
 void MainWindow::clientSize(uint32_t& width, uint32_t& height) const {
@@ -82,10 +105,12 @@ void MainWindow::setFullscreen(bool fullscreen) {
         // exactement l'écran, elle permet à Windows d'afficher la swap chain
         // sans composition supplémentaire (« independent flip »).
         SetWindowLongPtrW(hwnd_, GWL_STYLE, WS_POPUP | WS_VISIBLE);
+        SetMenu(hwnd_, nullptr);   // pas de barre de menus en plein écran : clic droit
         SetWindowPos(hwnd_, HWND_TOP, screen.left, screen.top, screen.right - screen.left,
                      screen.bottom - screen.top, SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
     } else {
         SetWindowLongPtrW(hwnd_, GWL_STYLE, WS_OVERLAPPEDWINDOW | WS_VISIBLE);
+        SetMenu(hwnd_, menuBar_);
         SetWindowPos(hwnd_, nullptr, windowedRect_.left, windowedRect_.top,
                      windowedRect_.right - windowedRect_.left, windowedRect_.bottom - windowedRect_.top,
                      SWP_FRAMECHANGED | SWP_NOOWNERZORDER | SWP_NOZORDER);
@@ -97,6 +122,45 @@ void MainWindow::showCursor() {
     if (cursorHidden_) {
         cursorHidden_ = false;
         SetCursor(LoadCursorW(nullptr, IDC_ARROW));
+    }
+}
+
+bool MainWindow::cursorInClientArea() const {
+    POINT cursor{};
+    GetCursorPos(&cursor);                 // position en coordonnées écran
+    ScreenToClient(hwnd_, &cursor);        // -> coordonnées de la zone client
+    RECT client{};
+    GetClientRect(hwnd_, &client);
+    return PtInRect(&client, cursor) != FALSE;
+}
+
+void MainWindow::showContextMenu(LPARAM lParam) {
+    if (!buildContextMenu) {
+        return;
+    }
+    HMENU menu = buildContextMenu();
+    if (menu == nullptr) {
+        return;
+    }
+    // [API] Position du clic dans lParam ; (-1, -1) si le menu a été demandé au
+    // clavier (touche Menu ou Maj+F10) : on l'ouvre alors au centre.
+    POINT at{static_cast<short>(LOWORD(lParam)), static_cast<short>(HIWORD(lParam))};
+    if (at.x == -1 && at.y == -1) {
+        RECT rect{};
+        GetWindowRect(hwnd_, &rect);
+        at = {(rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2};
+    }
+    showCursor();
+    inMenuLoop_ = true;   // le curseur reste visible tant que le menu est ouvert
+    // [API] TPM_RETURNCMD : au lieu d'envoyer WM_COMMAND, TrackPopupMenu
+    // renvoie directement l'identifiant choisi (0 si le menu est fermé sans choix).
+    const UINT chosen = static_cast<UINT>(TrackPopupMenu(
+        menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, at.x, at.y, 0, hwnd_, nullptr));
+    DestroyMenu(menu);
+    inMenuLoop_ = false;
+    scheduleCursorHide();
+    if (chosen != 0 && onCommand) {
+        onCommand(chosen);
     }
 }
 
@@ -159,23 +223,45 @@ LRESULT MainWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             }
             return 0;
 
-        case WM_KEYDOWN:
+        case WM_KEYDOWN: {
+            // Les touches sont traduites en commandes, traitées par App comme
+            // celles des menus : une seule logique pour les deux.
+            uint32_t command = 0;
             switch (wParam) {   // wParam = code de touche virtuelle (VK_*)
-                case VK_ESCAPE:
-                    DestroyWindow(hwnd_);
-                    return 0;
-                case VK_F11:
-                    setFullscreen(!fullscreen_);
-                    return 0;
-                case 'S':       // les touches lettres ont le code ASCII majuscule
-                    if (onToggleScaling) {
-                        onToggleScaling();
-                    }
-                    return 0;
-                default:
-                    break;
+                case VK_ESCAPE: command = command::Quit; break;
+                case VK_F11:    command = command::ToggleFullscreen; break;
+                case 'S':       command = command::ScalingCycle; break;   // code ASCII majuscule
+                case 'R':       command = command::RangeToggle; break;
+                default:        break;
+            }
+            if (command != 0 && onCommand) {
+                onCommand(command);
+                return 0;
             }
             break;
+        }   // [C++] accolades obligatoires : un « case » qui déclare une variable
+
+        case WM_COMMAND:
+            // [API] Choix dans la barre de menus : identifiant dans le mot bas de wParam.
+            if (HIWORD(wParam) == 0 && onCommand) {   // 0 = vient d'un menu
+                onCommand(LOWORD(wParam));
+                return 0;
+            }
+            break;
+
+        case WM_CONTEXTMENU:
+            showContextMenu(lParam);
+            return 0;
+
+        case WM_ENTERMENULOOP:
+            inMenuLoop_ = true;
+            showCursor();
+            return 0;
+
+        case WM_EXITMENULOOP:
+            inMenuLoop_ = false;
+            scheduleCursorHide();
+            return 0;
 
         case WM_MOUSEMOVE:
             showCursor();
@@ -185,8 +271,12 @@ LRESULT MainWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
         case WM_TIMER:
             if (wParam == kCursorTimerId) {
                 KillTimer(hwnd_, kCursorTimerId);
-                cursorHidden_ = true;
-                SetCursor(nullptr);
+                // Ne pas masquer le curseur pendant qu'un menu est ouvert, ni
+                // quand il est hors de l'image (barre de titre, menus, autre fenêtre).
+                if (!inMenuLoop_ && cursorInClientArea()) {
+                    cursorHidden_ = true;
+                    SetCursor(nullptr);
+                }
             }
             return 0;
 
@@ -203,6 +293,9 @@ LRESULT MainWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
             return 1;   // D3D dessine tout : inutile d'effacer (évite un clignotement)
 
         case WM_DESTROY:
+            // Détacher la barre de menus : sinon Windows la détruirait avec la
+            // fenêtre, et notre destructeur la détruirait une seconde fois.
+            SetMenu(hwnd_, nullptr);
             PostQuitMessage(0);   // fera sortir la boucle de messages (WM_QUIT)
             return 0;
 

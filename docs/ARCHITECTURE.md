@@ -26,8 +26,10 @@ flowchart LR
 | Fichier | Rôle | Dépend de Windows ? |
 | --- | --- | --- |
 | `main.cpp` | Point d'entrée : DPI, options, initialisation COM/MF, barrière d'exceptions | Oui |
-| `App.h/.cpp` | Assemble les briques, boucle principale, reconnexion, commande `--list` | Oui |
-| `MainWindow.h/.cpp` | Fenêtre Win32, plein écran sans bordure, clavier, curseur masqué | Oui |
+| `App.h/.cpp` | Assemble les briques, boucle principale, reconnexion, menus et commandes, `--list` | Oui |
+| `MainWindow.h/.cpp` | Fenêtre Win32, plein écran sans bordure, barre de menus, menu contextuel, curseur masqué ; traduit clavier et menus en commandes | Oui |
+| `Commands.h` | Identifiants des commandes (menus et raccourcis) | Oui (types Win32 non utilisés) |
+| `SettingsFile.h/.cpp` | Lecture et écriture de `hdmiscreen.ini` | Oui |
 | `CaptureDevices.h/.cpp` | Énumérer les périphériques, lire et appliquer leurs modes natifs | Oui |
 | `CaptureSession.h/.cpp` | Objet COM : lecture asynchrone, conserve la dernière image | Oui |
 | `Renderer.h/.cpp` | Direct3D 11 : swap chain, montée des images CPU, processeur vidéo | Oui |
@@ -36,7 +38,7 @@ flowchart LR
 | `VideoMode.h` | Description d'un mode (taille, fréquence, format) | **Non** |
 | `Selection.h/.cpp` | Choix du mode et du périphérique | **Non** |
 | `Geometry.h` | Rectangle d'affichage (bandes noires) | **Non** |
-| `CommandLine.h/.cpp` | Analyse des options | **Non** |
+| `CommandLine.h/.cpp` | Analyse des options, conversions texte partagées avec `hdmiscreen.ini` | **Non** |
 | `tests/SelectionTests.cpp` | Tests de la logique pure | **Non** |
 
 Séparer la logique pure de Windows permet de la tester partout (`ctest`) et de la lire sans connaître les API.
@@ -154,11 +156,34 @@ Le gris très sombre de l'écran « pas de signal » permet de distinguer une ab
 
 **Micro-coupure USB ou HDMI ?** Une coupure du lien **USB** fait disparaître le boîtier de Windows (erreur `0xC00D3EA2`), puis Windows le redétecte en une à deux secondes. Une coupure du seul lien **HDMI** laisse le boîtier présent : les images s'arrêtent simplement, puis reprennent.
 
-## 7. Limites connues et pistes
+## 7. Commandes, menus et réglages
+
+Toute action de l'utilisateur devient une **commande** (un identifiant de `Commands.h`) traitée en un seul endroit, `App::onCommand`. La fenêtre ne prend aucune décision : elle traduit les touches et les choix de menu en commandes.
+
+```mermaid
+flowchart LR
+    K["Touche<br/>F11, S, R, Échap"] --> MW["MainWindow<br/>WM_KEYDOWN"]
+    B["Barre de menus<br/>(mode fenêtré)"] -->|WM_COMMAND| MW
+    C["Clic droit<br/>(tous modes)"] -->|WM_CONTEXTMENU + TrackPopupMenu| MW
+    MW -->|onCommand id| APP["App::onCommand"]
+    APP --> EFF["Effet<br/>Renderer, fenêtre ou capture"]
+    APP --> INI["saveSettings<br/>hdmiscreen.ini"]
+    APP --> REF["refreshMenuBar<br/>cases cochées à jour"]
+```
+
+**Menus construits à chaque fois.** La barre de menus est reconstruite après chaque commande et à chaque ouverture ou fermeture de capture ; le menu contextuel est construit juste avant son affichage. Les cases cochées reflètent donc toujours l'état réel, sans synchronisation à maintenir.
+
+**Listes dynamiques.** Les menus *Périphérique* et *Mode* listent ce qui est branché. L'élément n° i reçoit l'identifiant `DeviceFirst + i` (ou `ModeFirst + i`), et `snapshotMenuLists` fige ces listes pour que l'identifiant désigne le même élément dans la barre et dans le menu contextuel. Le menu *Mode* propose une entrée par résolution du boîtier ; la fréquence et le format restent choisis automatiquement (60 i/s et NV12 de préférence).
+
+**Changer de périphérique ou de mode** ferme la capture puis la rouvre (`restartCapture`). Le boîtier « préféré » est oublié et les webcams écartées sont réexaminées : le choix explicite de l'utilisateur prime, y compris s'il désigne une webcam.
+
+**Réglages.** Ordre de priorité au lancement : valeurs par défaut < `hdmiscreen.ini` < ligne de commande. Après chaque commande, l'état courant complet est enregistré dans le fichier.
+
+## 8. Limites connues et pistes
 
 - **Agrandissement ×1,5** : sa qualité dépend du pilote du GPU. Piste : un shader bicubique/Lanczos avec léger renforcement de netteté.
-- **Pas de texte à l'écran** (mode courant, i/s). Piste : Direct2D/DirectWrite par-dessus la swap chain (touche F1).
+- **Pas de texte à l'écran en plein écran** (mode courant, i/s). Prévu en 5c : Direct2D/DirectWrite par-dessus la swap chain (touche F1). En mode fenêtré, le titre indique déjà le boîtier et le mode.
 - **Perte du périphérique D3D** (mise à jour du pilote, GPU réinitialisé) : le programme s'arrête au lieu de recréer le rendu.
-- **Pas de fichier de configuration** : les réglages passent par la ligne de commande. Piste : `hdmiscreen.ini` à côté de l'exécutable.
+- **Pas encore de barre d'état ni d'historique** des connexions : prévus en 5b.
 - **Inspection des périphériques** : à chaque tentative de connexion, les périphériques vidéo sont ouverts brièvement pour lire leurs modes (sans démarrer la capture), sauf ceux déjà écartés comme webcams.
 - **Audio HDMI** : ignoré.

@@ -4,8 +4,11 @@
 
 #include "App.h"
 #include "CaptureDevices.h"
+#include "Commands.h"
 #include "Log.h"
+#include "SettingsFile.h"
 
+#include <algorithm>
 #include <format>
 
 namespace hdmi {
@@ -180,7 +183,7 @@ int runListCommand(const Options& options) {
 // App
 // -----------------------------------------------------------------------------
 
-App::App(HINSTANCE instance, const Options& options)
+App::App(HINSTANCE instance, const Options& options, std::wstring settingsPath)
     // [C++] Liste d'initialisation : construit les membres AVANT le corps du
     // constructeur, dans l'ordre de leur déclaration dans App.h.
     : options_(options),
@@ -189,7 +192,10 @@ App::App(HINSTANCE instance, const Options& options)
       // dès qu'une attente l'a consommé.
       frameEvent_(CreateEventW(nullptr, FALSE, FALSE, nullptr)),
       renderer_(std::make_unique<Renderer>(window_.handle())),
-      screen_(primaryScreenSize()) {
+      screen_(primaryScreenSize()),
+      // [C++] settingsPath est reçu PAR VALEUR puis déplacé dans le membre :
+      // une seule copie au total, que l'appelant passe un temporaire ou non.
+      settingsPath_(std::move(settingsPath)) {
     if (!frameEvent_) {
         throw HrError(HRESULT_FROM_WIN32(GetLastError()), "CreateEventW");
     }
@@ -200,13 +206,17 @@ App::App(HINSTANCE instance, const Options& options)
     // [C++] Le lambda capture « this » : il ne doit pas survivre à l'objet App
     // (garanti ici, la fenêtre étant un membre détruit avec App).
     window_.onResize = [this](uint32_t width, uint32_t height) { renderer_->resize(width, height); };
-    window_.onToggleScaling = [this]() {
-        switch (renderer_->scalingMode()) {
-            case ScalingMode::Fit:      renderer_->setScalingMode(ScalingMode::OneToOne); break;
-            case ScalingMode::OneToOne: renderer_->setScalingMode(ScalingMode::Stretch); break;
-            case ScalingMode::Stretch:  renderer_->setScalingMode(ScalingMode::Fit); break;
-        }
+    window_.onCommand = [this](uint32_t command) { onCommand(command); };
+    window_.buildContextMenu = [this]() {
+        // Même instantané pour le menu contextuel et la barre de menus : les
+        // identifiants DeviceFirst + i désignent le même périphérique dans les deux.
+        snapshotMenuLists();
+        refreshMenuBar();
+        return buildContextMenu();
     };
+    snapshotMenuLists();
+    refreshMenuBar();
+    updateTitle();
 
     // La fenêtre a pu changer de taille avant que onResize soit branché.
     uint32_t width = 0;
@@ -294,6 +304,13 @@ bool App::tryOpenCapture() {
     waitingLogged_ = false;
     notReadyLogged_ = false;
     lastFrameTime_ = Clock::now();
+
+    currentDeviceName_ = device.info.name;
+    currentModes_ = device.modes;
+    currentMode_ = mode;
+    snapshotMenuLists();
+    refreshMenuBar();
+    updateTitle();
     return true;
 }
 
@@ -301,7 +318,19 @@ void App::closeCapture() {
     if (session_) {
         session_->stop();
         session_.Reset();
+        currentMode_.reset();
+        updateTitle();
     }
+}
+
+// Ferme puis rouvre la capture, après un changement de périphérique ou de mode.
+void App::restartCapture() {
+    closeCapture();
+    preferredLink_.clear();   // le choix de l'utilisateur prime sur le dernier boîtier
+    ignoredLinks_.clear();    // réexaminer tous les périphériques (une webcam peut être choisie)
+    waitingLogged_ = false;
+    notReadyLogged_ = false;
+    tryOpenCapture();
 }
 
 void App::renderPendingFrame() {
@@ -369,6 +398,275 @@ int App::run() {
             showingNoSignal_ = true;
         }
     }
+}
+
+// -----------------------------------------------------------------------------
+// Menus et commandes
+// -----------------------------------------------------------------------------
+// [API] Les menus sont construits par programme (CreateMenu, AppendMenuW)
+// plutôt que décrits dans un fichier de ressources .rc : leurs listes de
+// périphériques et de modes changent selon le matériel branché. Chaque
+// construction crée des menus neufs, qui reflètent l'état courant (cases cochées).
+// Voir docs/API_WINDOWS.md §1.6.
+
+namespace {
+
+// Ajoute un élément de menu, éventuellement coché.
+// [API] MF_STRING : élément texte ; MF_CHECKED : coche à gauche. Le texte après
+// une tabulation (\t) s'affiche aligné à droite : on y indique le raccourci.
+// « & » souligne la lettre d'accès clavier (Alt+lettre).
+void addItem(HMENU menu, uint32_t id, const std::wstring& text, bool checked = false,
+             bool enabled = true) {
+    UINT flags = MF_STRING;
+    if (checked) flags |= MF_CHECKED;
+    if (!enabled) flags |= MF_GRAYED;
+    AppendMenuW(menu, flags, id, text.c_str());
+}
+
+void addSeparator(HMENU menu) { AppendMenuW(menu, MF_SEPARATOR, 0, nullptr); }
+
+// Ajoute un sous-menu. Le menu parent en devient propriétaire : détruire le
+// parent (DestroyMenu) détruit aussi ses sous-menus.
+// [C++] reinterpret_cast : l'API attend le handle du sous-menu déguisé en
+// entier (UINT_PTR), à la place de l'identifiant de commande.
+void addSubmenu(HMENU menu, HMENU submenu, const wchar_t* text) {
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(submenu), text);
+}
+
+} // namespace
+
+void App::snapshotMenuLists() {
+    // Périphériques : simple énumération (rapide, sans ouvrir les périphériques).
+    menuDevices_.clear();
+    try {
+        for (const CaptureDeviceInfo& info : enumerateCaptureDevices()) {
+            if (menuDevices_.size() >= command::ListCapacity) {
+                break;
+            }
+            menuDevices_.push_back({info.name, ignoredLinks_.count(info.symbolicLink) != 0});
+        }
+    } catch (const HrError& e) {
+        log::error(L"Liste des périphériques : " + widen(e.what()));
+    }
+
+    // Modes : une entrée par taille distincte du boîtier en cours, la plus grande
+    // en premier. La fréquence et le format restent choisis automatiquement.
+    menuModes_.clear();
+    for (const VideoMode& mode : currentModes_) {
+        if (mode.format == PixelFormat::Other) {
+            continue;
+        }
+        const RequestedMode size{mode.width, mode.height, 0};
+        // [C++] std::find_if ~ stream().filter().findFirst() : renvoie un
+        // itérateur sur le premier élément qui vérifie le prédicat, ou end().
+        const auto existing = std::find_if(menuModes_.begin(), menuModes_.end(),
+            [&size](const RequestedMode& m) { return m.width == size.width && m.height == size.height; });
+        if (existing == menuModes_.end() && menuModes_.size() < command::ListCapacity) {
+            menuModes_.push_back(size);
+        }
+    }
+    std::sort(menuModes_.begin(), menuModes_.end(), [](const RequestedMode& a, const RequestedMode& b) {
+        return static_cast<uint64_t>(a.width) * a.height > static_cast<uint64_t>(b.width) * b.height;
+    });
+}
+
+HMENU App::buildFileMenu() const {
+    HMENU menu = CreatePopupMenu();
+    addItem(menu, command::Reconnect, L"&Reconnecter le boîtier");
+    addSeparator(menu);
+    addItem(menu, command::Quit, L"&Quitter\tÉchap");
+    return menu;
+}
+
+HMENU App::buildDisplayMenu() const {
+    const ScalingMode scaling = renderer_->scalingMode();
+    HMENU menu = CreatePopupMenu();
+    addItem(menu, command::ToggleFullscreen, L"&Plein écran\tF11", window_.isFullscreen());
+    addSeparator(menu);
+    addItem(menu, command::ScalingFit, L"&Ajuster (proportions conservées)\tS", scaling == ScalingMode::Fit);
+    addItem(menu, command::ScalingOneToOne, L"Pixel pour pixel (&1:1)\tS", scaling == ScalingMode::OneToOne);
+    addItem(menu, command::ScalingStretch, L"É&tirer (plein écran déformé)\tS", scaling == ScalingMode::Stretch);
+    addSeparator(menu);
+    addItem(menu, command::RangeLimited, L"Plage de couleur &limitée (16-235)\tR", !options_.fullRange);
+    addItem(menu, command::RangeFull, L"Plage de couleur &complète (0-255)\tR", options_.fullRange);
+    return menu;
+}
+
+HMENU App::buildDeviceMenu() const {
+    HMENU menu = CreatePopupMenu();
+    addItem(menu, command::DeviceAuto, L"&Automatique (boîtier de capture détecté)", options_.deviceFilter.empty());
+    if (!menuDevices_.empty()) {
+        addSeparator(menu);
+    }
+    for (size_t i = 0; i < menuDevices_.size(); ++i) {
+        const MenuDevice& device = menuDevices_[i];
+        std::wstring label = device.name;
+        if (session_ && device.name == currentDeviceName_) {
+            label += L"  (en cours)";
+        } else if (device.ignored) {
+            label += L"  (webcam, ignorée en automatique)";
+        }
+        addItem(menu, command::DeviceFirst + static_cast<uint32_t>(i), label,
+                !options_.deviceFilter.empty() && device.name == options_.deviceFilter);
+    }
+    return menu;
+}
+
+HMENU App::buildModeMenu() const {
+    HMENU menu = CreatePopupMenu();
+    std::wstring autoLabel = L"&Automatique (meilleur mode pour l'écran)";
+    if (!options_.mode && currentMode_) {
+        autoLabel = L"&Automatique : " + describe(*currentMode_);
+    }
+    addItem(menu, command::ModeAuto, autoLabel, !options_.mode);
+    if (menuModes_.empty()) {
+        addItem(menu, 0, L"(modes connus une fois le boîtier ouvert)", false, false);
+        return menu;
+    }
+    addSeparator(menu);
+    for (size_t i = 0; i < menuModes_.size(); ++i) {
+        const RequestedMode& m = menuModes_[i];
+        const bool checked = options_.mode && options_.mode->width == m.width && options_.mode->height == m.height;
+        addItem(menu, command::ModeFirst + static_cast<uint32_t>(i),
+                std::format(L"{} × {}", m.width, m.height), checked);
+    }
+    return menu;
+}
+
+HMENU App::buildHelpMenu() const {
+    HMENU menu = CreatePopupMenu();
+    addItem(menu, command::ShowShortcuts, L"&Raccourcis clavier");
+    addItem(menu, command::About, L"À &propos de HdmiScreen");
+    return menu;
+}
+
+HMENU App::buildMenuBar() const {
+    // [API] CreateMenu : une barre de menus ; CreatePopupMenu : un menu déroulant.
+    HMENU bar = CreateMenu();
+    addSubmenu(bar, buildFileMenu(), L"&Fichier");
+    addSubmenu(bar, buildDisplayMenu(), L"&Affichage");
+    addSubmenu(bar, buildDeviceMenu(), L"&Périphérique");
+    addSubmenu(bar, buildModeMenu(), L"&Mode");
+    addSubmenu(bar, buildHelpMenu(), L"Aid&e");
+    return bar;
+}
+
+HMENU App::buildContextMenu() const {
+    // Même contenu que la barre de menus, réorganisé pour un accès rapide.
+    HMENU menu = CreatePopupMenu();
+    addItem(menu, command::ToggleFullscreen, L"&Plein écran\tF11", window_.isFullscreen());
+    addSeparator(menu);
+    addSubmenu(menu, buildDisplayMenu(), L"&Affichage");
+    addSubmenu(menu, buildDeviceMenu(), L"Pé&riphérique");
+    addSubmenu(menu, buildModeMenu(), L"&Mode");
+    addSeparator(menu);
+    addItem(menu, command::Reconnect, L"Re&connecter le boîtier");
+    addSubmenu(menu, buildHelpMenu(), L"Aid&e");
+    addSeparator(menu);
+    addItem(menu, command::Quit, L"&Quitter\tÉchap");
+    return menu;
+}
+
+void App::refreshMenuBar() {
+    window_.setMenuBar(buildMenuBar());
+}
+
+void App::updateTitle() {
+    std::wstring title = L"HdmiScreen";
+    if (session_ && currentMode_) {
+        title += L" — " + currentDeviceName_ + L" · " + describe(*currentMode_);
+    } else {
+        title += L" — en attente du boîtier";
+    }
+    window_.setTitle(title);
+}
+
+void App::persistSettings() {
+    saveSettings(settingsPath_, options_);
+}
+
+void App::onCommand(uint32_t id) {
+    // Choix de la mise à l'échelle et de la plage, factorisés dans des lambdas locales.
+    auto setScaling = [this](ScalingMode scaling) {
+        renderer_->setScalingMode(scaling);
+        options_.scaling = scaling;
+    };
+    auto setFullRange = [this](bool fullRange) {
+        renderer_->setFullRange(fullRange);
+        options_.fullRange = fullRange;
+    };
+
+    // [C++] Un switch ne fonctionne que sur des entiers ou des enums (pas sur des
+    // chaînes comme en Java depuis la version 7).
+    switch (id) {
+        case command::Reconnect:
+            log::info(L"Reconnexion demandée");
+            closeCapture();
+            ignoredLinks_.clear();
+            tryOpenCapture();
+            break;
+        case command::Quit:
+            DestroyWindow(window_.handle());
+            return;   // la fenêtre n'existe plus : ne plus toucher aux menus
+        case command::ToggleFullscreen:
+            window_.setFullscreen(!window_.isFullscreen());
+            options_.windowed = !window_.isFullscreen();
+            break;
+        case command::ScalingFit:       setScaling(ScalingMode::Fit); break;
+        case command::ScalingOneToOne:  setScaling(ScalingMode::OneToOne); break;
+        case command::ScalingStretch:   setScaling(ScalingMode::Stretch); break;
+        case command::ScalingCycle:
+            switch (renderer_->scalingMode()) {
+                case ScalingMode::Fit:      setScaling(ScalingMode::OneToOne); break;
+                case ScalingMode::OneToOne: setScaling(ScalingMode::Stretch); break;
+                case ScalingMode::Stretch:  setScaling(ScalingMode::Fit); break;
+            }
+            break;
+        case command::RangeLimited: setFullRange(false); break;
+        case command::RangeFull:    setFullRange(true); break;
+        case command::RangeToggle:  setFullRange(!options_.fullRange); break;
+        case command::ShowShortcuts:
+            MessageBoxW(window_.handle(),
+                        L"Échap\tQuitter\n"
+                        L"F11\tPlein écran / fenêtre\n"
+                        L"S\tMise à l'échelle : ajuster, 1:1, étirer\n"
+                        L"R\tPlage de couleur : limitée / complète\n"
+                        L"Clic droit\tMenu (aussi en plein écran)",
+                        L"HdmiScreen — raccourcis clavier", MB_OK | MB_ICONINFORMATION);
+            return;
+        case command::About: {
+            // [C++] L"HdmiScreen " HDMISCREEN_VERSION : deux littéraux côte à côte
+            // sont concaténés par le compilateur. La version vient de CMakeLists.txt.
+            const std::wstring text = std::wstring(L"HdmiScreen " HDMISCREEN_VERSION L"\n\n") +
+                                      L"Affiche en plein écran l'entrée d'un boîtier de capture HDMI.\n\n" +
+                                      L"Réglages enregistrés dans :\n" + settingsPath_;
+            MessageBoxW(window_.handle(), text.c_str(), L"À propos de HdmiScreen",
+                        MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+        case command::DeviceAuto:
+            options_.deviceFilter.clear();
+            restartCapture();
+            break;
+        case command::ModeAuto:
+            options_.mode.reset();
+            restartCapture();
+            break;
+        default:
+            // Listes dynamiques : périphérique n°i ou mode n°i.
+            if (id >= command::DeviceFirst && id < command::DeviceFirst + menuDevices_.size()) {
+                options_.deviceFilter = menuDevices_[id - command::DeviceFirst].name;
+                restartCapture();
+            } else if (id >= command::ModeFirst && id < command::ModeFirst + menuModes_.size()) {
+                options_.mode = menuModes_[id - command::ModeFirst];
+                restartCapture();
+            } else {
+                return;   // commande inconnue
+            }
+            break;
+    }
+    persistSettings();
+    refreshMenuBar();   // cases cochées à jour
 }
 
 } // namespace hdmi

@@ -31,6 +31,8 @@ Le projet utilise **C++20** : la version moderne du langage, très différente d
 | `instanceof` + cast | `dynamic_cast` (C++), `QueryInterface` / `ComPtr::As` (COM) | §9 |
 | `int` toujours 32 bits | `int32_t`, `uint32_t`… pour une taille garantie | §12 |
 | `public static void main` | Fonction libre `wWinMain` | §1 |
+| Surcharges pour simuler des valeurs par défaut | Arguments par défaut (`bool checked = false`) | §9 |
+| `switch` sur une `String` | `switch` uniquement sur entiers et enums | §12 |
 
 ---
 
@@ -171,6 +173,16 @@ probed.push_back(std::move(device));   // le ProbedDevice est déplacé dans le 
 
 **Retourner une variable locale par valeur est gratuit** : `return result;` dans `usableModes` ne copie pas le vecteur (le compilateur le construit directement chez l'appelant, ou le déplace). Il ne faut donc pas écrire `return std::move(result);`, qui peut même empêcher cette optimisation.
 
+**Recevoir par valeur, puis déplacer.** Quand une fonction doit **garder** une chaîne (la stocker dans un membre), on la reçoit par valeur et on la déplace dans le membre :
+
+```cpp
+// App.cpp
+App::App(HINSTANCE instance, const Options& options, std::wstring settingsPath)
+    : …, settingsPath_(std::move(settingsPath)) { }
+```
+
+L'appelant paie une seule copie s'il garde sa chaîne, et aucune s'il passe un temporaire. Avec `const std::wstring&`, la copie dans le membre serait systématique. Pour un paramètre seulement **lu**, `const T&` reste la règle (§2).
+
 ---
 
 ## 6. Erreurs : exceptions et codes de retour
@@ -297,6 +309,20 @@ L'ordre effectif est celui de la **déclaration** des membres dans la classe, pa
 | `reinterpret_cast<T>(x)` | Réinterpréter des bits : entier ↔ pointeur | `GWLP_USERDATA` dans `windowProc` |
 | `dynamic_cast<T>(x)` | Cast vérifié à l'exécution (≈ `instanceof`) | Non utilisé ; en COM on passe par `QueryInterface` |
 
+**Arguments par défaut et surcharge.** Java n'a pas de valeurs par défaut pour les paramètres ; on y écrit plusieurs méthodes surchargées. Le C++ permet les deux :
+
+```cpp
+// Arguments par défaut, déclarés une seule fois (dans le .h s'il y en a un)
+ParseResult parseArguments(const std::vector<std::wstring>& args, const Options& base = {});
+void addItem(HMENU menu, uint32_t id, const std::wstring& text, bool checked = false, bool enabled = true);
+
+// Surcharge : même nom, types de paramètres différents
+std::wstring toText(const RequestedMode& mode);
+const wchar_t* toText(ScalingMode scaling);
+```
+
+Les valeurs par défaut se placent obligatoirement en fin de liste ; on ne peut pas « sauter » un paramètre du milieu. Elles sont écrites dans la **déclaration** (le `.h`), et non répétées dans la définition (le `.cpp`).
+
 ---
 
 ## 10. Fonctions de rappel (callbacks) C et pointeur this
@@ -355,6 +381,10 @@ ComPtr<IMFSample> CaptureSession::takeLatestSample() {
 **`auto`** déduit le type, comme `var`. À réserver aux cas où le type est évident ou très long (itérateurs, tuples).
 
 **`enum class`** : énumération typée (`PixelFormat::Nv12`), sans conversion implicite en `int`. Contrairement à Java, elle ne peut avoir ni méthodes ni champs : on écrit des fonctions libres à côté (`toString(PixelFormat)`).
+
+**`enum` « classique »** : ses valeurs se convertissent implicitement en entier. On l'utilise volontairement pour les identifiants de commande (`Commands.h`), que les API de menus Win32 manipulent comme des `UINT`. Pour ne pas polluer l'espace de noms, l'enum est placé dans un `namespace command` dédié : on écrit `command::Quit`.
+
+**`switch`** ne fonctionne que sur des entiers et des enums, pas sur des chaînes comme en Java (depuis Java 7). Un `case` qui déclare une variable doit être placé entre accolades `{ }` (cf. `WM_KEYDOWN` dans `MainWindow.cpp`), sinon la portée de la variable déborde sur les `case` suivants et le compilateur refuse le code.
 
 **`constexpr`** : valeur ou fonction calculable à la compilation (`kReconnectInterval`, `computeDestinationRect`). `static_assert` vérifie une condition pendant la compilation (cf. les tests).
 
