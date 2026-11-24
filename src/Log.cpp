@@ -5,6 +5,7 @@
 #include "Log.h"
 #include "ComUtils.h"
 
+#include <format>
 #include <string>
 
 namespace hdmi::log {
@@ -24,8 +25,21 @@ void writeConsole(std::wstring_view text) {
     WriteConsoleW(g_console, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
 }
 
+// Heure locale au format [HH:MM:SS.mmm], pour mesurer la fréquence et la
+// durée des coupures.
+// [API] GetLocalTime remplit une structure SYSTEMTIME (heure, minutes…),
+// l'équivalent de LocalDateTime.now() en Java.
+std::wstring timestamp() {
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    // [C++] {:02} : sur 2 chiffres, complété par des zéros (comme %02d).
+    return std::format(L"[{:02}:{:02}:{:02}.{:03}] ", now.wHour, now.wMinute, now.wSecond,
+                       now.wMilliseconds);
+}
+
 void write(const wchar_t* prefix, std::wstring_view message) {
-    std::wstring line = prefix;
+    std::wstring line = timestamp();
+    line.append(prefix);
     line.append(message);   // append : concaténation sans créer de nouvelle chaîne
     line.append(L"\n");
     OutputDebugStringW(line.c_str());   // [API] flux de débogage

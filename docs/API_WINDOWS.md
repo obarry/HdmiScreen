@@ -31,7 +31,10 @@ Windows communique avec la fenêtre par **messages** : un entier (`WM_KEYDOWN`, 
 | --- | --- | --- |
 | `WM_NCCREATE` | Tout premier message de la fenêtre | Mémorise le pointeur `this` (voir §1.3) |
 | `WM_SIZE` | La fenêtre change de taille | Redimensionne la swap chain |
-| `WM_KEYDOWN` | Touche enfoncée (`wParam` = code `VK_*`) | Échap, F11, S |
+| `WM_KEYDOWN` | Touche enfoncée (`wParam` = code `VK_*`) | Échap, F11, S, R, traduits en commandes |
+| `WM_COMMAND` | Choix dans la barre de menus (`LOWORD(wParam)` = identifiant) | Transmis à `App::onCommand` |
+| `WM_CONTEXTMENU` | Clic droit, touche Menu ou Maj+F10 | Affiche le menu contextuel |
+| `WM_ENTERMENULOOP` / `WM_EXITMENULOOP` | Un menu s'ouvre / se ferme | Le curseur reste visible pendant ce temps |
 | `WM_MOUSEMOVE` | La souris bouge | Réaffiche le curseur, relance le minuteur |
 | `WM_TIMER` | Un minuteur (`SetTimer`) expire | Masque le curseur |
 | `WM_SETCURSOR` | Windows demande quel curseur afficher | Aucun, s'il doit être masqué |
@@ -77,6 +80,50 @@ HdmiScreen doit attendre **deux** choses : les messages ET l'arrivée d'une imag
 | `CommandLineToArgvW` | Découper la ligne de commande en arguments |
 | `AttachConsole`, `WriteConsoleW` | Écrire dans l'invite de commandes qui a lancé le programme |
 | `OutputDebugStringW` | Journal visible dans Visual Studio (fenêtre Sortie) ou DebugView |
+| `GetLocalTime` | Heure locale pour horodater le journal |
+| `SetWindowTextW` | Titre de la fenêtre (boîtier et mode en cours) |
+| `MessageBoxW` | Boîtes « Raccourcis clavier » et « À propos » |
+| `GetModuleFileNameW` | Chemin de l'exécutable, pour placer `hdmiscreen.ini` à côté |
+
+### 1.6 Menus
+
+**Fichiers : `App.cpp` (section « Menus et commandes »), `MainWindow.cpp`, `Commands.h`.**
+
+Un menu Win32 est un objet système désigné par un handle `HMENU`. Chaque élément porte un **identifiant de commande** entier, renvoyé quand l'utilisateur le choisit. Il n'y a pas d'objet « action » avec un écouteur comme en Swing : tout passe par cet identifiant, défini dans `Commands.h`.
+
+Il existe deux façons de créer des menus :
+
+- les décrire dans un **fichier de ressources `.rc`**, compilé et intégré à l'exécutable. C'est la façon classique pour des menus fixes, éditables dans Visual Studio ;
+- les **construire par programme**. HdmiScreen procède ainsi, parce que les menus *Périphérique* et *Mode* dépendent du matériel branché.
+
+| API | Rôle |
+| --- | --- |
+| `CreateMenu` | Crée une barre de menus (vide) |
+| `CreatePopupMenu` | Crée un menu déroulant : sous-menu ou menu contextuel |
+| `AppendMenuW(menu, MF_STRING, id, texte)` | Ajoute un élément ; `MF_CHECKED` le coche, `MF_GRAYED` le désactive, `MF_SEPARATOR` ajoute un trait |
+| `AppendMenuW(menu, MF_POPUP, (UINT_PTR)sousMenu, texte)` | Ajoute un sous-menu ; le parent en devient propriétaire |
+| `SetMenu(hwnd, menu)` | Attache la barre à la fenêtre (`nullptr` la retire, comme en plein écran) |
+| `TrackPopupMenu(menu, TPM_RETURNCMD, x, y, …)` | Affiche un menu contextuel et, avec `TPM_RETURNCMD`, renvoie directement l'identifiant choisi (0 si aucun) |
+| `DestroyMenu` | Détruit un menu et tous ses sous-menus |
+
+Conventions d'écriture des libellés : `&` souligne la lettre d'accès (Alt+lettre), et le texte placé après une tabulation `\t` s'affiche aligné à droite, pour indiquer le raccourci clavier (`L"&Plein écran\tF11"`).
+
+**Propriété des menus, un piège classique.** Un menu attaché à une fenêtre est détruit avec elle. HdmiScreen retire sa barre en plein écran puis la remet : `MainWindow` en reste donc propriétaire, la détache dans `WM_DESTROY` et la détruit elle-même dans son destructeur. Sans ce détachement, le menu serait détruit deux fois.
+
+### 1.7 Fichiers .ini
+
+**Fichier : `SettingsFile.cpp`.**
+
+Win32 fournit depuis toujours des fonctions pour les fichiers de configuration au format `.ini` (sections `[nom]` et lignes `clé=valeur`) :
+
+| API | Rôle |
+| --- | --- |
+| `GetPrivateProfileStringW(section, clé, défaut, tampon, taille, fichier)` | Lit une valeur ; renvoie `défaut` si le fichier, la section ou la clé n'existe pas |
+| `WritePrivateProfileStringW(section, clé, valeur, fichier)` | Écrit ou remplace une valeur ; crée la section et le fichier si besoin |
+
+Ces fonctions relisent et réécrivent le fichier à chaque appel : c'est lent mais sans importance pour quelques réglages. Elles ont une **subtilité d'encodage** : un fichier qu'elles créent elles-mêmes est en ANSI (page de code locale), et un nom accentué comme « Caméra virtuelle » serait abîmé. Si le fichier commence par la marque UTF-16 (BOM, octets `FF FE`), elles lisent et écrivent en Unicode. `SettingsFile.cpp` crée donc le fichier lui-même avec ce BOM (`CreateFileW` + `WriteFile`) avant la première écriture.
+
+Pour des réglages plus riches, on utiliserait plutôt le registre Windows (`RegSetValueExW`) ou un fichier JSON ; le `.ini` a l'avantage d'être lisible et modifiable dans le Bloc-notes.
 
 ---
 
@@ -336,6 +383,10 @@ La conversion YUV → RGB dépend de deux réglages, passés au processeur vidé
 | `CoInitializeEx`, `CoTaskMemFree`, `MultiByteToWideChar` | `ComUtils.h` | `ComInitializer`, `CoTaskString`, `widen` |
 | `AttachConsole`, `WriteConsoleW`, `OutputDebugStringW` | `Log.cpp` | |
 | `RegisterClassExW`, `CreateWindowExW`, `SetWindowLongPtrW`, `SetWindowPos`, `SetTimer`, `DefWindowProcW` | `MainWindow.cpp` | |
+| `SetMenu`, `TrackPopupMenu`, `WM_COMMAND`, `WM_CONTEXTMENU` | `MainWindow.cpp` | `setMenuBar`, `showContextMenu`, `handleMessage` |
+| `CreateMenu`, `CreatePopupMenu`, `AppendMenuW`, `MessageBoxW` | `App.cpp` | section « Menus et commandes » |
+| `GetPrivateProfileStringW`, `WritePrivateProfileStringW`, `GetModuleFileNameW` | `SettingsFile.cpp` | |
+| `GetLocalTime` | `Log.cpp` | `timestamp` |
 | `MsgWaitForMultipleObjectsEx`, `PeekMessageW`, `DispatchMessageW`, `SetThreadExecutionState`, `GetMonitorInfoW` | `App.cpp` | `App::run`, `KeepDisplayOn`, `primaryScreenSize` |
 | `MFStartup`, `MFEnumDeviceSources`, `MFCreateDeviceSource`, `IMFMediaTypeHandler` | `CaptureDevices.cpp` | |
 | `MFCreateSourceReaderFromMediaSource`, `IMFSourceReader`, `IMFSourceReaderCallback` | `CaptureSession.cpp` | |

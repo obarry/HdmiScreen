@@ -17,8 +17,10 @@
 
 #include <chrono>    // std::chrono::steady_clock ~ System.nanoTime
 #include <memory>    // std::unique_ptr
+#include <optional>
 #include <set>       // std::set ~ TreeSet
 #include <string>
+#include <vector>
 
 namespace hdmi {
 
@@ -31,7 +33,8 @@ int runListCommand(const Options& options);
 
 class App {
 public:
-    App(HINSTANCE instance, const Options& options);
+    // settingsPath : fichier hdmiscreen.ini où enregistrer les choix faits dans les menus.
+    App(HINSTANCE instance, const Options& options, std::wstring settingsPath);
     ~App();
     App(const App&) = delete;
     App& operator=(const App&) = delete;
@@ -43,7 +46,22 @@ public:
 private:
     bool tryOpenCapture();
     void closeCapture();
+    void restartCapture();
     void renderPendingFrame();
+
+    // --- Commandes et menus (App.cpp, section « Menus ») ---
+    void onCommand(uint32_t command);
+    void snapshotMenuLists();               // fige les listes périphériques/modes des menus
+    HMENU buildMenuBar() const;
+    HMENU buildContextMenu() const;
+    HMENU buildFileMenu() const;
+    HMENU buildDisplayMenu() const;
+    HMENU buildDeviceMenu() const;
+    HMENU buildModeMenu() const;
+    HMENU buildHelpMenu() const;
+    void refreshMenuBar();
+    void updateTitle();
+    void persistSettings();
 
     // [C++] Ordre des membres = ordre de construction ; la destruction se fait
     // dans l'ordre INVERSE. La session est donc détruite avant le rendu, et le
@@ -61,9 +79,28 @@ private:
     bool showingNoSignal_ = false;
 
     // Tolérance aux coupures.
+    std::wstring settingsPath_;
+
+    // État de la capture en cours, pour les menus et le titre.
+    std::wstring currentDeviceName_;
+    std::vector<VideoMode> currentModes_;  // modes du boîtier en cours (ou du dernier utilisé)
+    std::optional<VideoMode> currentMode_;
+
+    // Listes affichées dans les menus : l'élément n°i correspond à la commande
+    // DeviceFirst + i (ou ModeFirst + i). Figées par snapshotMenuLists.
+    struct MenuDevice {
+        std::wstring name;
+        bool ignored = false;   // écarté en sélection automatique (webcam)
+    };
+    std::vector<MenuDevice> menuDevices_;
+    std::vector<RequestedMode> menuModes_;
+
     std::wstring preferredLink_;           // boîtier utilisé en dernier (lien symbolique)
     std::set<std::wstring> ignoredLinks_;  // périphériques écartés (webcams) : plus rouverts
     bool waitingLogged_ = false;
+    bool notReadyLogged_ = false;          // « détecté mais pas encore prêt » déjà signalé
+    int disconnectCount_ = 0;              // nombre de coupures depuis le lancement
+    Clock::time_point lostTime_{};         // instant de la dernière coupure
 };
 
 } // namespace hdmi

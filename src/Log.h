@@ -2,6 +2,8 @@
 // Log.h — Journalisation minimale
 // =============================================================================
 //
+// Chaque ligne commence par l'heure locale : [HH:MM:SS.mmm] [HdmiScreen] ...
+//
 // Une application « fenêtrée » (sous-système WINDOWS) n'a pas de console :
 // printf n'affiche rien. On écrit donc :
 //  - toujours dans le flux de débogage (visible dans Visual Studio, fenêtre

@@ -209,6 +209,35 @@ void testCommandLine() {
     CHECK(!parseArguments({L"--scaling", L"zoom"}).ok());
 }
 
+void testSettingsTextRoundTrip() {
+    // Ce qui est écrit dans hdmiscreen.ini doit se relire à l'identique.
+    for (ScalingMode s : {ScalingMode::Fit, ScalingMode::OneToOne, ScalingMode::Stretch}) {
+        CHECK(parseScalingText(toText(s)) == s);
+    }
+    CHECK(toText(RequestedMode{1920, 1080, 0}) == L"1920x1080");
+    CHECK(toText(RequestedMode{1920, 1080, 60}) == L"1920x1080@60");
+    const auto back = parseModeText(toText(RequestedMode{1600, 1200, 50}));
+    CHECK(back && back->width == 1600 && back->height == 1200 && back->fps == 50);
+}
+
+void testCommandLineOverridesSettings() {
+    // Options lues dans le .ini : fenêtré, mode imposé, échelle 1:1.
+    Options fromIni;
+    fromIni.windowed = true;
+    fromIni.mode = RequestedMode{1920, 1080, 0};
+    fromIni.scaling = ScalingMode::OneToOne;
+
+    // Sans argument : tout est conservé.
+    const ParseResult same = parseArguments({}, fromIni);
+    CHECK(same.ok() && same.options.windowed && same.options.mode &&
+          same.options.scaling == ScalingMode::OneToOne);
+
+    // Un argument ne remplace que sa propre valeur.
+    const ParseResult over = parseArguments({L"--fullscreen"}, fromIni);
+    CHECK(over.ok() && !over.options.windowed && over.options.mode &&
+          over.options.scaling == ScalingMode::OneToOne);
+}
+
 } // namespace
 
 int main() {
@@ -226,6 +255,8 @@ int main() {
     testFitLetterbox();
     testOneToOneAndStretch();
     testCommandLine();
+    testSettingsTextRoundTrip();
+    testCommandLineOverridesSettings();
 
     std::printf("%d vérifications, %d échec(s)\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
