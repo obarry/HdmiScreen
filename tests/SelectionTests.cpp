@@ -207,6 +207,11 @@ void testCommandLine() {
     CHECK(!parseArguments({L"--mode"}).ok());
     CHECK(!parseArguments({L"--bogus"}).ok());
     CHECK(!parseArguments({L"--scaling", L"zoom"}).ok());
+
+    const ParseResult upscale = parseArguments({L"--upscale", L"lanczos", L"--sharpness", L"2"});
+    CHECK(upscale.ok() && upscale.options.upscale == UpscaleFilter::Lanczos && upscale.options.sharpness == 2);
+    CHECK(!parseArguments({L"--upscale", L"nearest"}).ok());
+    CHECK(!parseArguments({L"--sharpness", L"9"}).ok());
 }
 
 void testSettingsTextRoundTrip() {
@@ -216,6 +221,11 @@ void testSettingsTextRoundTrip() {
     }
     CHECK(toText(RequestedMode{1920, 1080, 0}) == L"1920x1080");
     CHECK(toText(RequestedMode{1920, 1080, 60}) == L"1920x1080@60");
+    for (UpscaleFilter f : {UpscaleFilter::VideoProcessor, UpscaleFilter::Bicubic, UpscaleFilter::Lanczos}) {
+        CHECK(parseUpscaleText(toText(f)) == f);
+    }
+    CHECK(parseSharpnessText(L"0") == 0 && parseSharpnessText(L"3") == 3);
+    CHECK(!parseSharpnessText(L"4") && !parseSharpnessText(L"") && !parseSharpnessText(L"-1"));
     const auto back = parseModeText(toText(RequestedMode{1600, 1200, 50}));
     CHECK(back && back->width == 1600 && back->height == 1200 && back->fps == 50);
 }

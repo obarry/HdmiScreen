@@ -28,6 +28,16 @@ enum class ScalingMode {
     Stretch     // remplir toute la fenêtre, quitte à déformer l'image
 };
 
+// Filtre utilisé pour agrandir l'image (Renderer, ShaderScaler).
+enum class UpscaleFilter {
+    VideoProcessor,   // processeur vidéo du GPU : lissage simple, le plus économe
+    Bicubic,          // shader Catmull-Rom : contours nets
+    Lanczos           // shader Lanczos 2 lobes : le plus net
+};
+
+// Niveaux de renforcement de netteté (passe B des shaders) : 0 = aucun.
+constexpr int kMaxSharpnessLevel = 3;
+
 // Calcule où dessiner une image source (srcW × srcH) dans une cible (dstW × dstH).
 //
 // Exemple du projet : 1920×1080 dans 2880×1800 en mode Fit

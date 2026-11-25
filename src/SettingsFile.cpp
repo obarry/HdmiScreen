@@ -91,6 +91,13 @@ Options loadSettings(const std::wstring& path) {
     }
 
     options.fullRange = readValue(path, kDisplay, L"colorRange", L"limited") == L"full";
+
+    if (const auto upscale = parseUpscaleText(readValue(path, kDisplay, L"upscale", L"gpu"))) {
+        options.upscale = *upscale;
+    }
+    if (const auto sharpness = parseSharpnessText(readValue(path, kDisplay, L"sharpness", L"1"))) {
+        options.sharpness = *sharpness;
+    }
     return options;
 }
 
@@ -101,6 +108,8 @@ void saveSettings(const std::wstring& path, const Options& options) {
     writeValue(path, kDisplay, L"fullscreen", options.windowed ? L"0" : L"1");
     writeValue(path, kDisplay, L"scaling", toText(options.scaling));
     writeValue(path, kDisplay, L"colorRange", options.fullRange ? L"full" : L"limited");
+    writeValue(path, kDisplay, L"upscale", toText(options.upscale));
+    writeValue(path, kDisplay, L"sharpness", std::to_wstring(options.sharpness));
 }
 
 } // namespace hdmi

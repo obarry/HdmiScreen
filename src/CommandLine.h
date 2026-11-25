@@ -36,6 +36,10 @@ struct Options {
     std::wstring deviceFilter;       // --device "texte" : partie du nom du périphérique
     std::optional<RequestedMode> mode;   // --mode 1920x1200@60
     ScalingMode scaling = ScalingMode::Fit;  // --scaling fit|1to1|stretch
+    // Lissage du GPU par défaut : le plus éprouvé. Les filtres par shader n'apportent
+    // de gain visible que si le signal reçu est déjà dégradé.
+    UpscaleFilter upscale = UpscaleFilter::VideoProcessor;   // --upscale gpu|bicubic|lanczos
+    int sharpness = 1;               // --sharpness 0..3 (0 = aucun renforcement)
 };
 
 // Résultat de l'analyse : soit des options, soit un message d'erreur.
@@ -67,6 +71,13 @@ std::wstring toText(const RequestedMode& mode);
 // paramètre : c'est la surcharge (overloading), comme en Java.
 const wchar_t* toText(ScalingMode scaling);
 std::optional<ScalingMode> parseScalingText(const std::wstring& text);
+
+// « gpu », « bicubic », « lanczos » <-> UpscaleFilter.
+const wchar_t* toText(UpscaleFilter filter);
+std::optional<UpscaleFilter> parseUpscaleText(const std::wstring& text);
+
+// « 0 » à « 3 » -> niveau de netteté ; vide si hors limites.
+std::optional<int> parseSharpnessText(const std::wstring& text);
 
 // Texte d'aide affiché par --help.
 const wchar_t* helpText();

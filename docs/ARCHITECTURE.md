@@ -32,12 +32,14 @@ flowchart LR
 | `SettingsFile.h/.cpp` | Lecture et écriture de `hdmiscreen.ini` | Oui |
 | `CaptureDevices.h/.cpp` | Énumérer les périphériques, lire et appliquer leurs modes natifs | Oui |
 | `CaptureSession.h/.cpp` | Objet COM : lecture asynchrone, conserve la dernière image | Oui |
-| `Renderer.h/.cpp` | Direct3D 11 : swap chain, montée des images CPU, processeur vidéo | Oui |
+| `Renderer.h/.cpp` | Direct3D 11 : swap chain, montée des images CPU ; choisit entre shaders et processeur vidéo | Oui |
+| `ShaderScaler.h/.cpp` | Agrandissement par shaders : conversion YUV→RGB, netteté, filtre bicubique ou Lanczos | Oui |
+| `ScalingShaders.h` | Code HLSL des shaders (chaîne de caractères compilée au lancement) | Non (texte HLSL) |
 | `ComUtils.h` | `ComPtr`, `HrError`/`throwIfFailed`, classes RAII, conversion UTF-8 | Oui |
 | `Log.h/.cpp` | Journal : flux de débogage + console de l'invite | Oui |
 | `VideoMode.h` | Description d'un mode (taille, fréquence, format) | **Non** |
 | `Selection.h/.cpp` | Choix du mode et du périphérique | **Non** |
-| `Geometry.h` | Rectangle d'affichage (bandes noires) | **Non** |
+| `Geometry.h` | Rectangle d'affichage (bandes noires), modes de mise à l'échelle et filtres d'agrandissement | **Non** |
 | `CommandLine.h/.cpp` | Analyse des options, conversions texte partagées avec `hdmiscreen.ini` | **Non** |
 | `tests/SelectionTests.cpp` | Tests de la logique pure | **Non** |
 
@@ -80,9 +82,17 @@ sequenceDiagram
     else image en mémoire CPU (YUY2/NV12 non compressé)
         R->>R: Lock2D, Map, copie ligne à ligne, CopyResource
     end
-    R->>GPU: VideoProcessorBlt (YUV→RGB, ×1,5, bandes noires)
+    alt filtre bicubique ou Lanczos (NV12, shaders disponibles)
+        R->>GPU: ShaderScaler : passes A, B, C (YUV→RGB, netteté, ×1,5, bandes noires)
+    else lissage GPU, autre format, ou shaders indisponibles
+        R->>GPU: VideoProcessorBlt (YUV→RGB, ×1,5, bandes noires)
+    end
     R->>GPU: Present(1, 0)
 ```
+
+**Deux chemins d'affichage.** Par défaut, l'image est agrandie par le processeur vidéo du GPU (« lissage du GPU »), le chemin le plus éprouvé. Sur demande (touche F, menu *Affichage*), elle l'est par nos propres shaders (`ShaderScaler`, voir [API_WINDOWS.md §4.7](API_WINDOWS.md#47-shaders-et-pipeline-graphique--lagrandissement--maison-)), avec des filtres plus nets. Le processeur vidéo reprend la main si l'image n'est pas en NV12 ou si les shaders n'ont pas pu être préparés (message dans le journal au démarrage).
+
+À l'essai sur le matériel, les filtres par shader n'ont pas apporté de gain visible une fois le signal HDMI propre : le flou constaté venait du signal envoyé par le portable source (corrigé en renégociant la liaison, par exemple en passant à 30 Hz puis en revenant à 60 Hz). Un scintillement occasionnel est en outre signalé avec les shaders, en cours d'analyse. Une erreur des shaders pendant la session les désactive pour la suite, sans interrompre l'affichage.
 
 **Pas de file d'attente.** Si une nouvelle image arrive avant que la précédente ait été affichée, elle la remplace. On préfère sauter une image plutôt qu'accumuler du retard : pour un écran de travail, c'est la fraîcheur qui compte. Avec `SetMaximumFrameLatency(1)` et l'attente sur l'objet de la swap chain, au plus une image est en attente d'affichage.
 
@@ -181,7 +191,7 @@ flowchart LR
 
 ## 8. Limites connues et pistes
 
-- **Agrandissement ×1,5** : sa qualité dépend du pilote du GPU. Piste : un shader bicubique/Lanczos avec léger renforcement de netteté.
+- **Agrandissement ×1,5** : les filtres par shader améliorent nettement le texte, mais ne peuvent pas recréer le détail absent d'une source 1080p (escaliers sur les obliques), ni la couleur réduite du NV12 (bavures colorées autour du texte ClearType).
 - **Pas de texte à l'écran en plein écran** (mode courant, i/s). Prévu en 5c : Direct2D/DirectWrite par-dessus la swap chain (touche F1). En mode fenêtré, le titre indique déjà le boîtier et le mode.
 - **Perte du périphérique D3D** (mise à jour du pilote, GPU réinitialisé) : le programme s'arrête au lieu de recréer le rendu.
 - **Pas encore de barre d'état ni d'historique** des connexions : prévus en 5b.

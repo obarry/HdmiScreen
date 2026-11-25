@@ -201,6 +201,8 @@ App::App(HINSTANCE instance, const Options& options, std::wstring settingsPath)
     }
     renderer_->setScalingMode(options.scaling);
     renderer_->setFullRange(options.fullRange);
+    renderer_->setUpscaleFilter(options.upscale);
+    renderer_->setSharpness(options.sharpness);
 
     // Brancher les actions de la fenêtre.
     // [C++] Le lambda capture « this » : il ne doit pas survivre à l'objet App
@@ -489,6 +491,29 @@ HMENU App::buildDisplayMenu() const {
     addSeparator(menu);
     addItem(menu, command::RangeLimited, L"Plage de couleur &limitée (16-235)\tR", !options_.fullRange);
     addItem(menu, command::RangeFull, L"Plage de couleur &complète (0-255)\tR", options_.fullRange);
+    addSeparator(menu);
+
+    // Filtre d'agrandissement : les filtres par shader sont grisés si le GPU
+    // ne permet pas de les utiliser.
+    const UpscaleFilter filter = renderer_->upscaleFilter();
+    const bool shaders = renderer_->shadersAvailable();
+    addItem(menu, command::UpscaleVideoProcessor, L"Agrandissement : lissage du &GPU (processeur vidéo)\tF",
+            filter == UpscaleFilter::VideoProcessor);
+    addItem(menu, command::UpscaleBicubic, L"Agrandissement : &bicubique net (Catmull-Rom)\tF",
+            filter == UpscaleFilter::Bicubic, shaders);
+    addItem(menu, command::UpscaleLanczos, L"Agrandissement : La&nczos (le plus net)\tF",
+            filter == UpscaleFilter::Lanczos, shaders);
+
+    // Netteté : seulement avec les filtres par shader.
+    HMENU sharpness = CreatePopupMenu();
+    const wchar_t* levels[] = {L"Aucune", L"Légère", L"Moyenne", L"Forte"};
+    for (int level = 0; level <= kMaxSharpnessLevel; ++level) {
+        addItem(sharpness, command::Sharpness0 + static_cast<uint32_t>(level),
+                std::wstring(levels[level]) + L"\tN", renderer_->sharpness() == level);
+    }
+    const bool sharpnessUsable = shaders && filter != UpscaleFilter::VideoProcessor;
+    AppendMenuW(menu, MF_POPUP | (sharpnessUsable ? 0u : static_cast<UINT>(MF_GRAYED)),
+                reinterpret_cast<UINT_PTR>(sharpness), L"Ne&tteté");
     return menu;
 }
 
@@ -575,6 +600,17 @@ void App::updateTitle() {
     std::wstring title = L"HdmiScreen";
     if (session_ && currentMode_) {
         title += L" — " + currentDeviceName_ + L" · " + describe(*currentMode_);
+        // Filtre d'agrandissement : utile pour comparer les réglages.
+        const UpscaleFilter filter = renderer_->shadersAvailable() ? renderer_->upscaleFilter()
+                                                                   : UpscaleFilter::VideoProcessor;
+        switch (filter) {
+            case UpscaleFilter::VideoProcessor: title += L" · lissage GPU"; break;
+            case UpscaleFilter::Bicubic:        title += L" · bicubique"; break;
+            case UpscaleFilter::Lanczos:        title += L" · Lanczos"; break;
+        }
+        if (filter != UpscaleFilter::VideoProcessor) {
+            title += L", netteté " + std::to_wstring(renderer_->sharpness());
+        }
     } else {
         title += L" — en attente du boîtier";
     }
@@ -594,6 +630,16 @@ void App::onCommand(uint32_t id) {
     auto setFullRange = [this](bool fullRange) {
         renderer_->setFullRange(fullRange);
         options_.fullRange = fullRange;
+    };
+    auto setUpscale = [this](UpscaleFilter filter) {
+        renderer_->setUpscaleFilter(filter);
+        options_.upscale = filter;
+        log::info(std::wstring(L"Agrandissement : ") + toText(filter));
+    };
+    auto setSharpness = [this](int level) {
+        renderer_->setSharpness(level);
+        options_.sharpness = level;
+        log::info(L"Netteté : " + std::to_wstring(level));
     };
 
     // [C++] Un switch ne fonctionne que sur des entiers ou des enums (pas sur des
@@ -625,12 +671,41 @@ void App::onCommand(uint32_t id) {
         case command::RangeLimited: setFullRange(false); break;
         case command::RangeFull:    setFullRange(true); break;
         case command::RangeToggle:  setFullRange(!options_.fullRange); break;
+        case command::UpscaleVideoProcessor: setUpscale(UpscaleFilter::VideoProcessor); break;
+        case command::UpscaleBicubic:        setUpscale(UpscaleFilter::Bicubic); break;
+        case command::UpscaleLanczos:        setUpscale(UpscaleFilter::Lanczos); break;
+        case command::UpscaleCycle:
+            // Ordre : lissage GPU -> bicubique -> Lanczos -> lissage GPU…
+            // Sans shaders, le cycle reste sur le lissage GPU.
+            if (!renderer_->shadersAvailable()) {
+                setUpscale(UpscaleFilter::VideoProcessor);
+            } else if (options_.upscale == UpscaleFilter::VideoProcessor) {
+                setUpscale(UpscaleFilter::Bicubic);
+            } else if (options_.upscale == UpscaleFilter::Bicubic) {
+                setUpscale(UpscaleFilter::Lanczos);
+            } else {
+                setUpscale(UpscaleFilter::VideoProcessor);
+            }
+            break;
+        case command::Sharpness0:
+        case command::Sharpness1:
+        case command::Sharpness2:
+        case command::Sharpness3:
+            // [C++] Plusieurs « case » à la suite partagent le même code
+            // (pas de « break » entre eux) : c'est le « fall-through », comme en Java.
+            setSharpness(static_cast<int>(id - command::Sharpness0));
+            break;
+        case command::SharpnessCycle:
+            setSharpness((options_.sharpness + 1) % (kMaxSharpnessLevel + 1));
+            break;
         case command::ShowShortcuts:
             MessageBoxW(window_.handle(),
                         L"Échap\tQuitter\n"
                         L"F11\tPlein écran / fenêtre\n"
                         L"S\tMise à l'échelle : ajuster, 1:1, étirer\n"
                         L"R\tPlage de couleur : limitée / complète\n"
+                        L"F\tAgrandissement : lissage GPU, bicubique, Lanczos\n"
+                        L"N\tNetteté : aucune, légère, moyenne, forte\n"
                         L"Clic droit\tMenu (aussi en plein écran)",
                         L"HdmiScreen — raccourcis clavier", MB_OK | MB_ICONINFORMATION);
             return;
@@ -667,6 +742,7 @@ void App::onCommand(uint32_t id) {
     }
     persistSettings();
     refreshMenuBar();   // cases cochées à jour
+    updateTitle();      // le titre indique aussi le filtre d'agrandissement
 }
 
 } // namespace hdmi
