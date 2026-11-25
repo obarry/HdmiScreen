@@ -390,6 +390,12 @@ ComPtr<IMFSample> CaptureSession::takeLatestSample() {
 
 **Espaces de noms.** `namespace hdmi { … }` regroupe le code comme un package, mais sans lien avec l'arborescence des dossiers. `using namespace hdmi;` équivaut à un `import hdmi.*` ; on l'évite dans les `.h`, car il s'imposerait à tous ceux qui les incluent.
 
+**Mise en page mémoire : `alignas` et `static_assert`.** Java ne laisse jamais voir la disposition des champs d'un objet en mémoire. En C++, une `struct` est une suite d'octets dont on maîtrise l'ordre, ce qui permet de l'envoyer telle quelle au GPU. `ShaderScaler.cpp` déclare `struct alignas(16) ShaderParams`, copie exacte du `cbuffer` HLSL, et vérifie sa taille à la compilation avec `static_assert(sizeof(ShaderParams) == 48, …)`. Si un champ est ajouté d'un seul côté, la compilation échoue au lieu de produire un affichage faux.
+
+**Objet facultatif : `std::unique_ptr` nul.** `Renderer::shaderScaler_` est un `unique_ptr` qui peut rester vide : si les shaders ne peuvent pas être préparés, l'exception est attrapée dans le constructeur de `Renderer` et l'affichage continue avec le processeur vidéo. Tester `if (!shaderScaler_)` correspond à un champ `null` en Java, mais la propriété reste claire : quand le pointeur n'est pas vide, c'est le `Renderer` qui possède l'objet, et `shaderScaler_.reset()` le détruit immédiatement.
+
+**`case` regroupés.** Plusieurs `case` à la suite, sans `break` entre eux, partagent le même code (cf. `Sharpness0` à `Sharpness3` dans `App::onCommand`). C'est le même « fall-through » qu'en Java.
+
 **Templates.** `ComPtr<T>`, `std::vector<T>` sont des *templates*, l'équivalent des génériques. Différence de fond : ils sont instanciés à la compilation pour chaque type (pas d'effacement de type), d'où des messages d'erreur parfois très longs.
 
 ---

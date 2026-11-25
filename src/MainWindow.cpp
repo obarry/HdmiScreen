@@ -232,6 +232,8 @@ LRESULT MainWindow::handleMessage(UINT message, WPARAM wParam, LPARAM lParam) {
                 case VK_F11:    command = command::ToggleFullscreen; break;
                 case 'S':       command = command::ScalingCycle; break;   // code ASCII majuscule
                 case 'R':       command = command::RangeToggle; break;
+                case 'F':       command = command::UpscaleCycle; break;
+                case 'N':       command = command::SharpnessCycle; break;
                 default:        break;
             }
             if (command != 0 && onCommand) {

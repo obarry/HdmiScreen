@@ -13,7 +13,7 @@
 #   ctest --test-dir build -C Release
 
 cmake_minimum_required(VERSION 3.21)
-project(HdmiScreen VERSION 0.2.0 LANGUAGES CXX)
+project(HdmiScreen VERSION 0.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)            # C++20 : std::format, etc.
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -63,11 +63,13 @@ if(WIN32)
         src/MainWindow.cpp
         src/Renderer.cpp
         src/SettingsFile.cpp
+        src/ShaderScaler.cpp
     )
     target_link_libraries(hdmiscreen PRIVATE
         hdmiscreen_core
         mfplat mf mfreadwrite mfuuid   # Media Foundation
         d3d11 dxgi                     # Direct3D 11 et DXGI
+        d3dcompiler                    # compilateur HLSL (shaders d'agrandissement)
         shell32                        # CommandLineToArgvW
     )
     # UNICODE : les macros Win32 (CreateWindowEx…) pointent vers les versions « W ».

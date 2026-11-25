@@ -3,6 +3,7 @@
 // =============================================================================
 
 #include "Renderer.h"
+#include "Log.h"
 
 #include <d3d10.h>     // [API] ID3D10Multithread (protection multithread du périphérique)
 #include <mfapi.h>     // [API] MFCreateDXGIDeviceManager
@@ -90,6 +91,15 @@ void copyPlane(BYTE* dst, UINT dstPitch, const BYTE* src, LONG srcPitch, UINT ro
 Renderer::Renderer(HWND window) {
     createDeviceAndManager();
     createSwapChain(window);
+
+    // Les shaders sont un plus : s'ils ne peuvent pas être préparés (GPU trop
+    // ancien, compilateur HLSL absent), on garde le processeur vidéo.
+    try {
+        shaderScaler_ = std::make_unique<ShaderScaler>(device_.Get());
+    } catch (const HrError& e) {
+        log::error(L"Agrandissement par shaders indisponible, processeur vidéo utilisé : " +
+                   widen(e.what()));
+    }
 }
 
 void Renderer::createDeviceAndManager() {
@@ -300,9 +310,12 @@ ComPtr<ID3D11Texture2D> Renderer::uploadFromSystemMemory(IMFMediaBuffer* buffer,
         desc.Usage = D3D11_USAGE_DEFAULT;
         desc.CPUAccessFlags = 0;
         desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        uploadReadableByShaders_ = true;
         if (FAILED(device_->CreateTexture2D(&desc, nullptr, &uploadTexture_))) {
             // Certains pilotes refusent ce drapeau pour YUY2 : on réessaie sans.
+            // Les shaders ne pourront alors pas la lire (processeur vidéo seulement).
             desc.BindFlags = 0;
+            uploadReadableByShaders_ = false;
             throwIfFailed(device_->CreateTexture2D(&desc, nullptr, &uploadTexture_),
                           "CreateTexture2D(upload)");
         }
@@ -370,7 +383,15 @@ void Renderer::drawFrame(IMFSample* sample, const FrameFormat& format) {
         texture = uploadFromSystemMemory(buffer.Get(), format);
     }
 
-    // 2. Préparer le processeur vidéo.
+    // 2. Agrandissement par shaders, si choisi et possible.
+    if (drawWithShaders(texture.Get(), subresource, format)) {
+        effectiveFilter_ = upscale_;
+        present();
+        return;
+    }
+    effectiveFilter_ = UpscaleFilter::VideoProcessor;
+
+    // 3. Sinon : processeur vidéo. Le préparer.
     ensureVideoProcessor(format);
 
     D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC inputDesc{};
@@ -383,7 +404,7 @@ void Renderer::drawFrame(IMFSample* sample, const FrameFormat& format) {
                                                               &inputDesc, &inputView),
                   "ID3D11VideoDevice::CreateVideoProcessorInputView");
 
-    // 3. Rectangles : toute l'image source -> rectangle calculé (bandes noires).
+    // 4. Rectangles : toute l'image source -> rectangle calculé (bandes noires).
     const Rect dst = computeDestinationRect(static_cast<int32_t>(format.width),
                                             static_cast<int32_t>(format.height),
                                             static_cast<int32_t>(width_),
@@ -405,7 +426,7 @@ void Renderer::drawFrame(IMFSample* sample, const FrameFormat& format) {
     black.RGBA.A = 1.0f;
     videoContext_->VideoProcessorSetOutputBackgroundColor(vp, FALSE, &black);
 
-    // 4. Espaces de couleur (docs/API_WINDOWS.md §5) :
+    // 5. Espaces de couleur (docs/API_WINDOWS.md §5) :
     //    entrée = YUV BT.709 (norme HD), plage 16-235 sauf --full-range ;
     //    sortie = RGB pleine plage 0-255 (celle de l'écran).
     D3D11_VIDEO_PROCESSOR_COLOR_SPACE inputSpace{};
@@ -417,7 +438,7 @@ void Renderer::drawFrame(IMFSample* sample, const FrameFormat& format) {
     outputSpace.RGB_Range = 0;     // 0 = 0-255
     videoContext_->VideoProcessorSetOutputColorSpace(vp, &outputSpace);
 
-    // 5. Conversion + mise à l'échelle en un seul appel, exécuté par le GPU.
+    // 6. Conversion + mise à l'échelle en un seul appel, exécuté par le GPU.
     D3D11_VIDEO_PROCESSOR_STREAM stream{};
     stream.Enable = TRUE;
     stream.pInputSurface = inputView.Get();
@@ -425,6 +446,69 @@ void Renderer::drawFrame(IMFSample* sample, const FrameFormat& format) {
                   "ID3D11VideoContext::VideoProcessorBlt");
 
     present();
+}
+
+// Renvoie une texture NV12 que les shaders peuvent lire, ou nullptr.
+//  - Image copiée depuis la mémoire CPU : uploadTexture_ convient directement.
+//  - Image décodée par le GPU (MJPEG) : la texture du décodeur n'est souvent
+//    pas lisible par les shaders, et fait partie d'un tableau. On copie la
+//    bonne tranche dans notre propre texture (copie GPU -> GPU, très rapide).
+ID3D11Texture2D* Renderer::shaderReadableTexture(ID3D11Texture2D* texture, UINT subresource,
+                                                 const FrameFormat& format) {
+    if (texture == uploadTexture_.Get()) {
+        return uploadReadableByShaders_ ? texture : nullptr;
+    }
+    if (!shaderInput_ || !sameFormat(format, shaderInputFormat_)) {
+        D3D11_TEXTURE2D_DESC desc{};
+        desc.Width = format.width;
+        desc.Height = format.height;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_NV12;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_DEFAULT;
+        desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        shaderInput_.Reset();
+        if (FAILED(device_->CreateTexture2D(&desc, nullptr, &shaderInput_))) {
+            return nullptr;
+        }
+        shaderInputFormat_ = format;
+    }
+    // [API] Les surfaces des décodeurs sont souvent plus hautes que l'image
+    // (ex. 1088 lignes pour 1080) : on ne copie que la zone utile (« box »).
+    const D3D11_BOX box{0, 0, 0, format.width, format.height, 1};
+    context_->CopySubresourceRegion(shaderInput_.Get(), 0, 0, 0, 0, texture, subresource, &box);
+    return shaderInput_.Get();
+}
+
+// Dessine l'image avec les shaders. Renvoie false s'il faut utiliser le
+// processeur vidéo à la place (choix de l'utilisateur, format, ou erreur).
+bool Renderer::drawWithShaders(ID3D11Texture2D* texture, UINT subresource, const FrameFormat& format) {
+    if (upscale_ == UpscaleFilter::VideoProcessor || !shaderScaler_ ||
+        format.format != PixelFormat::Nv12) {
+        return false;
+    }
+    ID3D11Texture2D* input = shaderReadableTexture(texture, subresource, format);
+    if (input == nullptr) {
+        return false;
+    }
+
+    const Rect dst = computeDestinationRect(static_cast<int32_t>(format.width),
+                                            static_cast<int32_t>(format.height),
+                                            static_cast<int32_t>(width_),
+                                            static_cast<int32_t>(height_), scaling_);
+    try {
+        shaderScaler_->draw(context_.Get(), {input, format.width, format.height},
+                            {backBufferRtv_.Get(), width_, height_, dst},
+                            {upscale_, sharpness_, fullRange_});
+    } catch (const HrError& e) {
+        // Erreur inattendue (mémoire GPU…) : on abandonne les shaders pour la
+        // suite de la session plutôt que d'échouer à chaque image.
+        log::error(L"Agrandissement par shaders désactivé : " + widen(e.what()));
+        shaderScaler_.reset();
+        return false;
+    }
+    return true;
 }
 
 void Renderer::drawNoSignal() {

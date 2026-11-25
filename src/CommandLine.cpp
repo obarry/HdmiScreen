@@ -76,6 +76,30 @@ std::optional<ScalingMode> parseScalingText(const std::wstring& text) {
     return std::nullopt;
 }
 
+const wchar_t* toText(UpscaleFilter filter) {
+    switch (filter) {
+        case UpscaleFilter::VideoProcessor: return L"gpu";
+        case UpscaleFilter::Bicubic:        return L"bicubic";
+        case UpscaleFilter::Lanczos:        return L"lanczos";
+    }
+    return L"bicubic";
+}
+
+std::optional<UpscaleFilter> parseUpscaleText(const std::wstring& text) {
+    if (text == L"gpu") return UpscaleFilter::VideoProcessor;
+    if (text == L"bicubic") return UpscaleFilter::Bicubic;
+    if (text == L"lanczos") return UpscaleFilter::Lanczos;
+    return std::nullopt;
+}
+
+std::optional<int> parseSharpnessText(const std::wstring& text) {
+    const auto value = parseNumber(text);
+    if (!value || *value > static_cast<uint32_t>(kMaxSharpnessLevel)) {
+        return std::nullopt;
+    }
+    return static_cast<int>(*value);
+}
+
 ParseResult parseArguments(const std::vector<std::wstring>& args, const Options& base) {
     ParseResult result;
     result.options = base;               // copie des options de départ (struct = type valeur)
@@ -132,6 +156,28 @@ ParseResult parseArguments(const std::vector<std::wstring>& args, const Options&
                 return result;
             }
             options.scaling = *scaling;
+        } else if (arg == L"--upscale") {
+            std::wstring value;
+            if (!nextValue(value)) {
+                return result;
+            }
+            const std::optional<UpscaleFilter> filter = parseUpscaleText(value);
+            if (!filter) {
+                result.error = L"Filtre d'agrandissement inconnu : " + value + L" (gpu, bicubic ou lanczos)";
+                return result;
+            }
+            options.upscale = *filter;
+        } else if (arg == L"--sharpness") {
+            std::wstring value;
+            if (!nextValue(value)) {
+                return result;
+            }
+            const std::optional<int> level = parseSharpnessText(value);
+            if (!level) {
+                result.error = L"Netteté invalide : " + value + L" (de 0 à 3)";
+                return result;
+            }
+            options.sharpness = *level;
         } else {
             result.error = L"Option inconnue : " + arg;
             return result;
@@ -152,6 +198,9 @@ Usage : hdmiscreen.exe [options]
   --mode 1920x1200[@60]  impose un mode de capture
   --scaling fit|1to1|stretch
                          mise à l'échelle (défaut : fit)
+  --upscale gpu|bicubic|lanczos
+                         filtre d'agrandissement (défaut : gpu)
+  --sharpness 0..3       renforcement de netteté (défaut : 1)
   --full-range           le signal est en plage complète 0-255 (défaut : 16-235)
   --windowed             démarre en fenêtre
   --fullscreen           démarre en plein écran
@@ -161,7 +210,7 @@ Les réglages choisis dans les menus sont enregistrés dans hdmiscreen.ini, à c
 de l'exécutable ; les options ci-dessus les remplacent pour la session.
 
 Raccourcis : Échap quitter, F11 plein écran/fenêtre, S mise à l'échelle,
-R plage de couleur, clic droit menu.
+F filtre d'agrandissement, N netteté, R plage de couleur, clic droit menu.
 )";
 }
 

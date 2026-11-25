@@ -13,6 +13,8 @@
 //   fullscreen=1
 //   scaling=fit
 //   colorRange=limited
+//   upscale=bicubic
+//   sharpness=1
 //
 // [API] Lecture/écriture avec GetPrivateProfileStringW et
 // WritePrivateProfileStringW, les fonctions Win32 historiques pour les

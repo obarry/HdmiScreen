@@ -335,7 +335,7 @@ Mise en place (`Renderer::ensureVideoProcessor`) :
 
 On désactive les « traitements automatiques » (`VideoProcessorSetStreamAutoProcessingMode`), comme le débruitage ou le renforcement des contours, qui ajouteraient de la latence et modifieraient le texte.
 
-La **qualité de l'agrandissement** dépend du pilote du GPU. Si le texte agrandi ×1,5 paraît trop doux, l'étape suivante possible est un *shader* maison (petit programme exécuté par le GPU) faisant un filtrage bicubique ou Lanczos.
+La **qualité de l'agrandissement** dépend du pilote du GPU, et c'est en général un lissage simple (bilinéaire) : le texte agrandi ×1,5 paraît doux. D'où l'agrandissement par shaders (§4.7), proposé en option depuis la version 0.3 ; le processeur vidéo (« lissage du GPU ») reste le réglage par défaut.
 
 ### 4.6 Partager le GPU avec Media Foundation
 
@@ -349,6 +349,52 @@ Quand le boîtier envoie du MJPEG, le décodeur matériel écrit l'image décod�
 L'image ne passe ainsi jamais par la mémoire CPU. Quand le boîtier envoie du YUY2 non compressé, l'image arrive en mémoire CPU (il n'y a rien à décoder) et `Renderer::uploadFromSystemMemory` la copie vers le GPU.
 
 ---
+
+### 4.7 Shaders et pipeline graphique : l'agrandissement « maison »
+
+**Fichiers : `ShaderScaler.cpp`, `ScalingShaders.h` (code HLSL).**
+
+Le processeur vidéo (§4.5) est une boîte noire : un appel, et le pilote fait tout. Pour choisir nous-mêmes le filtre d'agrandissement, on utilise l'autre moitié de Direct3D, le **pipeline graphique**, celui des jeux. On y dessine des triangles, et des **shaders** calculent la couleur de chaque pixel.
+
+**Qu'est-ce qu'un shader ?** Un petit programme exécuté par le GPU, des millions de fois en parallèle : une fois par sommet (*vertex shader*) ou une fois par pixel (*pixel shader*). Il s'écrit en **HLSL** (*High-Level Shading Language*), un langage proche du C, avec des types vectoriels (`float2`, `float3`, `float4`) et des fonctions mathématiques intégrées (`lerp`, `saturate`, `clamp`…). Un pixel shader reçoit la position du pixel (`SV_Position`) et renvoie sa couleur (`SV_Target`).
+
+**Compilation.** Le code HLSL est compilé au lancement par **`D3DCompile`** (bibliothèque `d3dcompiler_47.dll`, fournie avec Windows 10 et 11), pour le profil `vs_5_0` ou `ps_5_0` (modèle de shader 5.0 = Direct3D 11). Le résultat est un *bytecode* que le pilote retraduit pour son GPU. En cas d'erreur, le message du compilateur (ligne, colonne) est écrit dans le journal, et HdmiScreen revient au processeur vidéo.
+
+**Dessiner « toute la cible ».** On ne dessine pas de vraie géométrie : un seul triangle, assez grand pour couvrir toute la cible, dont le vertex shader calcule les 3 sommets à partir de leur numéro (`SV_VertexID`). Il n'y a donc ni tampon de sommets ni *input layout*. Le pixel shader s'exécute alors exactement une fois par pixel de la zone définie par le **viewport**.
+
+**Les trois passes**, pour chaque image :
+
+```mermaid
+flowchart LR
+    NV12["Texture NV12<br/>1920×1080"] -->|"Passe A : PSConvert<br/>YUV -> RGB"| RGB["RGB intermédiaire<br/>1920×1080"]
+    RGB -->|"Passe B : PSSharpen<br/>(si netteté > 0)"| SHARP["RGB renforcé<br/>1920×1080"]
+    SHARP -->|"Passe C : PSScaleBicubic / PSScaleLanczos<br/>viewport = rectangle de destination"| BB["Tampon arrière<br/>2880×1800"]
+    RGB -.->|"netteté 0"| BB
+```
+
+| Passe | Shader | Ce qu'il calcule |
+| --- | --- | --- |
+| A | `PSConvert` | Lit Y (vue `R8_UNORM` du plan Y) et UV (vue `R8G8_UNORM` du plan UV, interpolée), applique la plage de couleur et la matrice BT.709 |
+| B | `PSSharpen` | Renforcement de netteté adaptatif, sur le principe de *CAS* (AMD FidelityFX) : renforce moins là où le contraste est déjà fort, pour éviter les halos. Fait à la taille source, donc peu coûteux |
+| C | `PSScaleBicubic`, `PSScaleLanczos` | Pour chaque pixel de l'écran, la position correspondante dans la source, puis une moyenne pondérée des 4 × 4 pixels voisins (poids de Catmull-Rom ou de Lanczos 2 lobes). Un « anti-halo » rapproche le résultat de l'intervalle des 4 pixels les plus proches |
+
+**Pourquoi c'est plus net.** L'interpolation bilinéaire du processeur vidéo ne regarde que les 2 × 2 pixels voisins et fait une moyenne : un contour net devient une rampe. Les filtres 4 × 4 (Catmull-Rom, Lanczos) ont des poids **négatifs** sur les pixels éloignés, qui « creusent » de part et d'autre d'un contour et le gardent raide. Revers de la médaille : un léger liseré (halo) près des contours très contrastés, d'où l'anti-halo.
+
+**Les objets Direct3D du pipeline graphique :**
+
+| API | Rôle dans HdmiScreen |
+| --- | --- |
+| `CreateVertexShader`, `CreatePixelShader` | Charger le bytecode compilé |
+| `ID3D11ShaderResourceView` (SRV) | Vue de **lecture** d'une texture par un shader (registres `t0`, `t1`, `t2`) |
+| `ID3D11RenderTargetView` (RTV) | Vue d'**écriture** : la cible où dessine une passe |
+| `ID3D11SamplerState` | Comment lire entre deux pixels (ici linéaire, bords répétés), registre `s0` |
+| `ID3D11Buffer` (constant buffer) | Paramètres de l'image (tailles, rectangle, netteté, plage), registre `b0`. Sa mise en page doit correspondre exactement au `cbuffer` HLSL : `static_assert` le vérifie côté C++ |
+| `RSSetViewports` | Zone de la cible où l'on dessine (le rectangle de destination, pour la passe C) |
+| `OMSetRenderTargets`, `PSSetShaderResources` | Brancher la cible et les textures lues avant chaque `Draw(3, 0)` |
+
+**Règle à respecter :** une texture ne peut pas être lue et écrite dans la même passe. Avant de changer de cible, on délie donc les textures lues (`PSSetShaderResources` avec des `nullptr`).
+
+**Formats.** Les shaders ne traitent que le **NV12**, le format du boîtier à 60 i/s. Une image décodée par le GPU (MJPEG) est d'abord copiée dans une texture NV12 lisible par les shaders (`CopySubresourceRegion`, copie GPU → GPU). Pour le YUY2, le processeur vidéo reste utilisé.
 
 ## 5. Formats vidéo et couleurs
 
@@ -395,3 +441,6 @@ La conversion YUV → RGB dépend de deux réglages, passés au processeur vidé
 | `ID3D11VideoDevice`, `ID3D11VideoContext`, `VideoProcessorBlt` | `Renderer.cpp` | `ensureVideoProcessor`, `drawFrame` |
 | `IMF2DBuffer::Lock2D`, `ID3D11DeviceContext::Map`, `CopyResource` | `Renderer.cpp` | `LockedBuffer`, `uploadFromSystemMemory` |
 | `IMFDXGIBuffer::GetResource` | `Renderer.cpp` | `drawFrame` |
+| `CopySubresourceRegion` | `Renderer.cpp` | `shaderReadableTexture` |
+| `D3DCompile`, `CreateVertexShader`, `CreatePixelShader`, `CreateSamplerState`, `CreateBuffer` | `ShaderScaler.cpp` | constructeur |
+| `CreateShaderResourceView` (vues R8 / R8G8 sur NV12), `RSSetViewports`, `OMSetRenderTargets`, `Draw` | `ShaderScaler.cpp` | `ensureInputViews`, `draw` |

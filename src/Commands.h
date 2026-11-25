@@ -34,6 +34,15 @@ enum : uint32_t {
     RangeLimited,
     RangeFull,
     RangeToggle,           // touche R (pas dans les menus)
+    UpscaleVideoProcessor,
+    UpscaleBicubic,
+    UpscaleLanczos,
+    UpscaleCycle,          // touche F (pas dans les menus)
+    Sharpness0,            // Sharpness0 + n = niveau n (0 à 3)
+    Sharpness1,
+    Sharpness2,
+    Sharpness3,
+    SharpnessCycle,        // touche N (pas dans les menus)
 
     // Aide
     ShowShortcuts = 300,
